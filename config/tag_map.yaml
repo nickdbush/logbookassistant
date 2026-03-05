@@ -1,0 +1,658 @@
+# CNH Arbortext XML → HTML tag mapping
+#
+# Each entry can specify:
+#   html_tag    — target HTML element
+#   unwrap      — replace element with its content (drop the tag)
+#   strip       — remove element and all children
+#   attrs       — static HTML attributes
+#   attrs_from  — map HTML attrs from XML attrs: {html_attr: xml_attr}
+#   prefix      — text to prepend inside the element
+#   suffix      — text to append inside the element
+#   list_context — ol|ul — consecutive siblings need wrapping
+#   handler     — name of special-case handler function
+
+# ── IU root tags (all 7 types) → unwrap ──
+Diagnostic_IU:
+  unwrap: true
+Functional_Data_IU:
+  unwrap: true
+Service_IU:
+  unwrap: true
+Operating_IU:
+  unwrap: true
+General_IU:
+  unwrap: true
+Technical_Data_IU:
+  unwrap: true
+ServiceBulletin_IU:
+  unwrap: true
+
+# ── Document structure (doc/ files) ──
+Document:
+  unwrap: true
+Chapter:
+  html_tag: section
+IU_Set:
+  unwrap: true
+Predefined_Chapter_Set:
+  unwrap: true
+Userdefined_Chapter_Set:
+  unwrap: true
+
+# ── Content wrappers ──
+IU_Content:
+  unwrap: true
+Content:
+  unwrap: true
+Context:
+  html_tag: div
+  attrs: {class: context}
+
+# ── Paragraphs ──
+Para:
+  html_tag: p
+ParaCfg:
+  html_tag: p
+Paragraph:
+  html_tag: p
+Paragraph_Config:
+  unwrap: true
+Para_No_Table:
+  html_tag: p
+Para_No_Table_Config:
+  unwrap: true
+
+# ── Text ──
+Text:
+  unwrap: true
+Text_NoTrans:
+  html_tag: span
+  attrs: {class: notrans}
+Text_Config:
+  unwrap: true
+Text_Ctrl:
+  unwrap: true
+Text_Country:
+  unwrap: true
+Text_Item:
+  html_tag: li
+  list_context: ul
+Variable_Text:
+  unwrap: true
+
+# ── Titles ──
+Title:
+  html_tag: h3
+Full_Title:
+  html_tag: h2
+Sub_Title:
+  html_tag: h4
+Sub_Sub_Title:
+  html_tag: h5
+Extra_Title:
+  html_tag: h4
+Op_Title:
+  html_tag: h4
+Table_Title:
+  html_tag: caption
+table-title:
+  html_tag: caption
+Component_Title:
+  html_tag: h4
+Header:
+  html_tag: h3
+
+# ── CALS tables ──
+table:
+  html_tag: table
+tgroup:
+  handler: tgroup
+colspec:
+  strip: true
+thead:
+  html_tag: thead
+tbody:
+  html_tag: tbody
+tfoot:
+  html_tag: tfoot
+row:
+  html_tag: tr
+entry:
+  handler: entry
+
+# ── Lists ──
+List:
+  handler: list_tag
+Ordered_List:
+  html_tag: ol
+Non_Ordered_List:
+  html_tag: ul
+Ordered_Para_List:
+  html_tag: ol
+Non_Ordered_Para_List:
+  html_tag: ul
+Ordered_Para_List_No_Table:
+  html_tag: ol
+Non_Ordered_Para_List_No_Table:
+  html_tag: ul
+Ordered_Sub_Para_List:
+  html_tag: ol
+Non_Ordered_Sub_Para_List:
+  html_tag: ul
+Non_Ordered_Sub_Para_List_No_Table:
+  html_tag: ul
+Non_Ordered_Sub_List:
+  html_tag: ul
+ListItem:
+  html_tag: li
+List_Item:
+  html_tag: li
+List_Item_No_Table:
+  html_tag: li
+Sub_List_Item:
+  html_tag: li
+Sub_List_Item_No_Table:
+  html_tag: li
+Sub_Text_Item:
+  html_tag: li
+Item:
+  html_tag: li
+
+# ── Instructions (consecutive → <ol>) ──
+Instruction:
+  html_tag: li
+  list_context: ol
+Instructions:
+  html_tag: div
+  attrs: {class: instructions}
+IUInstruction:
+  unwrap: true
+IUInstructions:
+  unwrap: true
+General_Instruction:
+  html_tag: li
+  list_context: ol
+Operating_Instruction:
+  html_tag: li
+  list_context: ol
+Right_Instruction:
+  html_tag: li
+  list_context: ol
+Left_Instruction:
+  html_tag: li
+  list_context: ol
+RightInstr:
+  unwrap: true
+LeftInstr:
+  unwrap: true
+Right_Operation:
+  html_tag: li
+  list_context: ol
+Left_Operation:
+  html_tag: li
+  list_context: ol
+Operation:
+  html_tag: li
+  list_context: ol
+Prior_Operations:
+  html_tag: div
+  attrs: {class: prior-operations}
+  prefix: "**Prior Operations:** "
+Next_Operations:
+  html_tag: div
+  attrs: {class: next-operations}
+  prefix: "**Next Operations:** "
+Prior_Operation:
+  html_tag: li
+  list_context: ul
+
+# ── Notes / Warnings ──
+Note:
+  html_tag: blockquote
+  attrs: {class: note}
+  prefix: "**Note:** "
+Important:
+  html_tag: blockquote
+  attrs: {class: important}
+  prefix: "**Important:** "
+Warning:
+  html_tag: blockquote
+  attrs: {class: warning}
+  prefix: "**Warning:** "
+Caution:
+  html_tag: blockquote
+  attrs: {class: caution}
+  prefix: "**Caution:** "
+Danger:
+  html_tag: blockquote
+  attrs: {class: danger}
+  prefix: "**Danger:** "
+Attention:
+  html_tag: blockquote
+  attrs: {class: attention}
+  prefix: "**Attention:** "
+Legal_Note:
+  html_tag: blockquote
+  attrs: {class: legal-note}
+  prefix: "**Legal Note:** "
+
+# ── Safety messages ──
+Safety_Message:
+  html_tag: div
+  attrs: {class: safety-message}
+Embedded_SM:
+  html_tag: div
+  attrs: {class: safety-message}
+Section_SM:
+  html_tag: div
+  attrs: {class: safety-message}
+Grouped_SM:
+  html_tag: div
+  attrs: {class: safety-message}
+Warnings:
+  html_tag: div
+  attrs: {class: warnings}
+
+# ── Images ──
+Image:
+  handler: image
+Image_Config:
+  strip: true
+Image_Compound:
+  strip: true
+Image_Annotation:
+  strip: true
+Illustration:
+  handler: image
+Illustration_Config:
+  strip: true
+A3_Illustration:
+  handler: image
+A3_Illustration_Config:
+  strip: true
+A4_Illustration:
+  handler: image
+A4_Illustration_Config:
+  strip: true
+Product_Illustration:
+  handler: image
+Product_Illustration_Config:
+  strip: true
+Icon:
+  handler: icon
+Callout_Reference:
+  html_tag: span
+  attrs: {class: callout}
+
+# ── Physical data / measurements ──
+Physical_Data:
+  handler: physical_data
+Physical_Data_MI:
+  handler: physical_data_mi
+Physical_Data_M:
+  handler: physical_data_value
+Physical_Data_I:
+  strip: true
+Value:
+  unwrap: true
+Unit:
+  unwrap: true
+Range:
+  handler: range
+Range_MI:
+  handler: range_mi
+Range_M:
+  handler: range_value
+Range_I:
+  strip: true
+Min_Value:
+  unwrap: true
+Max_Value:
+  unwrap: true
+Tolerance:
+  handler: tolerance
+
+# ── Configuration / variant markup ──
+Configuration:
+  html_tag: div
+  attrs: {class: configuration}
+  attrs_from: {data-configdata: configdata}
+Component:
+  html_tag: div
+  attrs: {class: component}
+
+# ── Inline references ──
+Part_Set:
+  html_tag: span
+  attrs: {class: part-set}
+  attrs_from: {data-component-ref: Component_ref, data-ifsid: ifsid}
+Part_Reference:
+  html_tag: span
+  attrs: {class: part-reference}
+Part_Number:
+  html_tag: span
+  attrs: {class: part-number}
+Part_Description:
+  html_tag: span
+  attrs: {class: part-description}
+Part:
+  html_tag: span
+  attrs: {class: part}
+Part_List:
+  html_tag: div
+  attrs: {class: part-list}
+Quantity:
+  html_tag: span
+  attrs: {class: quantity}
+IU_IFS_Link:
+  html_tag: a
+  attrs: {class: iu-link}
+  attrs_from: {data-icecode: icecode, data-ifsid: ifsid}
+IU_Reference:
+  html_tag: span
+  attrs: {class: iu-reference}
+  attrs_from: {data-icecode: icecode, data-ifsid: ifsid}
+Internal_Reference:
+  html_tag: a
+  attrs: {class: internal-ref}
+  attrs_from: {href: fileref}
+Standard_Reference:
+  html_tag: span
+  attrs: {class: standard-ref}
+HydrauRef:
+  html_tag: span
+  attrs: {class: hydrau-ref}
+
+# ── Fault code resolution (FCR) ──
+Fault_Code_Reference:
+  html_tag: span
+  attrs: {class: fault-code}
+  attrs_from: {data-code: code, data-ecid: ecid}
+Fault_Code_Resolution:
+  html_tag: div
+  attrs: {class: fcr}
+Fault_Code_CCM:
+  html_tag: div
+  attrs: {class: fcr-ccm}
+FCR_Solving_Process:
+  html_tag: div
+  attrs: {class: fcr-solving-process}
+FCR_Possible_Failure_Mode:
+  html_tag: div
+  attrs: {class: fcr-possible-failure}
+FCR_Cause:
+  html_tag: div
+  attrs: {class: fcr-cause}
+FCR_Description:
+  html_tag: div
+  attrs: {class: fcr-description}
+FCR_Test:
+  html_tag: div
+  attrs: {class: fcr-test}
+  attrs_from: {data-step: number, data-testid: testid}
+FCR_Test_Ref:
+  html_tag: span
+  attrs: {class: fcr-test-ref}
+FCR_Test_Ref_Config:
+  strip: true
+FCR_Result_Action:
+  html_tag: div
+  attrs: {class: fcr-result-action}
+FCR_Result:
+  html_tag: div
+  attrs: {class: fcr-result}
+FCR_Action:
+  html_tag: div
+  attrs: {class: fcr-action}
+FCR_Schematics:
+  html_tag: div
+  attrs: {class: fcr-schematics}
+FCR_Schematics_Config:
+  strip: true
+FCR_Location:
+  html_tag: div
+  attrs: {class: fcr-location}
+Solved:
+  html_tag: div
+  attrs: {class: fcr-solved}
+
+# ── Troubleshooting (non-FCR) ──
+TroubleShooting:
+  html_tag: div
+  attrs: {class: troubleshooting}
+Symptom:
+  html_tag: div
+  attrs: {class: symptom}
+Symptom_Ref:
+  html_tag: span
+  attrs: {class: symptom-ref}
+Symptom_Resolution:
+  html_tag: div
+  attrs: {class: symptom-resolution}
+Possible_Cause:
+  html_tag: div
+  attrs: {class: possible-cause}
+Action:
+  html_tag: div
+  attrs: {class: action}
+Failure_Mode_Resolution:
+  html_tag: div
+  attrs: {class: failure-mode-resolution}
+FMRef:
+  html_tag: span
+  attrs: {class: fm-ref}
+Modular_FMRef:
+  html_tag: span
+  attrs: {class: modular-fm-ref}
+Modular_FailureModes:
+  html_tag: div
+  attrs: {class: modular-failure-modes}
+Solving_Process:
+  html_tag: div
+  attrs: {class: solving-process}
+
+# ── Test structure (non-FCR) ──
+Test:
+  html_tag: div
+  attrs: {class: test}
+Test_Condition:
+  html_tag: div
+  attrs: {class: test-condition}
+Test_Check:
+  html_tag: div
+  attrs: {class: test-check}
+Test_Ref:
+  html_tag: span
+  attrs: {class: test-ref}
+Test_Ref_Config:
+  strip: true
+Test_Advice:
+  html_tag: div
+  attrs: {class: test-advice}
+Testing:
+  html_tag: div
+  attrs: {class: testing}
+Expected_Result:
+  html_tag: div
+  attrs: {class: expected-result}
+Expected_Value:
+  html_tag: span
+  attrs: {class: expected-value}
+Other_Result:
+  html_tag: div
+  attrs: {class: other-result}
+Other_Value:
+  html_tag: span
+  attrs: {class: other-value}
+ER_Action:
+  html_tag: div
+  attrs: {class: er-action}
+ER_Next_Step:
+  html_tag: div
+  attrs: {class: er-next-step}
+OR_Action:
+  html_tag: div
+  attrs: {class: or-action}
+OR_Next_Step:
+  html_tag: div
+  attrs: {class: or-next-step}
+
+# ── Tools / Consumables / Warranty ──
+Tool_Reference:
+  html_tag: span
+  attrs: {class: tool-reference}
+  attrs_from: {data-part-number: part_number}
+Consumable_Reference:
+  html_tag: span
+  attrs: {class: consumable-reference}
+  attrs_from: {data-csid: csid}
+Warranty_Code:
+  html_tag: span
+  attrs: {class: warranty-code}
+  attrs_from: {data-code: code, data-time: time}
+Warranty_Code_List:
+  html_tag: div
+  attrs: {class: warranty-code-list}
+Special_Tools:
+  html_tag: div
+  attrs: {class: special-tools}
+
+# ── Metadata-only tags → strip ──
+Service_IU_Meta_Data:
+  strip: true
+TDS_Meta_Data:
+  strip: true
+ICE_Model:
+  strip: true
+ICE_Series:
+  strip: true
+ICE_Cover_Model:
+  strip: true
+Master_IU_Ref:
+  strip: true
+Product_Family:
+  strip: true
+Markets:
+  strip: true
+Market:
+  strip: true
+Country:
+  strip: true
+
+# ── Service bulletin metadata → strip ──
+SB_Pdt_Line:
+  strip: true
+SB_Group_Cares:
+  strip: true
+SB_Replaces:
+  strip: true
+SB_Binder:
+  strip: true
+SB_Issue_Number:
+  strip: true
+SB_Subject:
+  html_tag: h3
+SB_Group:
+  strip: true
+SB_Type:
+  strip: true
+SB_Template:
+  strip: true
+SB_Warranty_Status:
+  strip: true
+SB_Parts_Affect:
+  html_tag: div
+  attrs: {class: sb-parts-affect}
+SB_Action:
+  html_tag: div
+  attrs: {class: sb-action}
+SB_Description:
+  html_tag: div
+  attrs: {class: sb-description}
+SB_Service:
+  html_tag: div
+  attrs: {class: sb-service}
+SBW_Additional_Info:
+  html_tag: div
+  attrs: {class: sbw-additional-info}
+SBW_Action:
+  html_tag: div
+  attrs: {class: sbw-action}
+SBW_Description:
+  html_tag: div
+  attrs: {class: sbw-description}
+
+# ── PIP metadata → strip ──
+PIP_Termination_date:
+  strip: true
+PIP_Pgm_Code:
+  strip: true
+PIP_Progam_type:
+  strip: true
+
+# ── Controls / variables ──
+Control:
+  html_tag: div
+  attrs: {class: control}
+Control_Text:
+  unwrap: true
+Control_Num:
+  handler: physical_data
+Control_NumMI:
+  handler: physical_data_mi
+Num_Ctrl:
+  unwrap: true
+NumMI_Ctrl:
+  unwrap: true
+Name_Ctrl:
+  unwrap: true
+Range_Ctrl:
+  unwrap: true
+Variable_Num:
+  handler: physical_data
+Variable_NumMI:
+  handler: physical_data_mi
+Variable_List:
+  html_tag: div
+  attrs: {class: variable-list}
+Conditions:
+  html_tag: div
+  attrs: {class: conditions}
+
+# ── Formatting ──
+Page_Break:
+  html_tag: hr
+Sub:
+  html_tag: sub
+Sup:
+  html_tag: sup
+Brand:
+  html_tag: span
+  attrs: {class: brand}
+Trademark:
+  html_tag: span
+  attrs: {class: trademark}
+_bookmark:
+  strip: true
+
+# ── Media ──
+Media:
+  html_tag: div
+  attrs: {class: media}
+StaticImage:
+  handler: image
+Video:
+  html_tag: div
+  attrs: {class: video}
+URL:
+  html_tag: a
+  attrs_from: {href: url}
+SpeakerNote:
+  strip: true
+
+# ── Misc ──
+Exit:
+  html_tag: div
+  attrs: {class: exit}
+Explanation_View:
+  unwrap: true
