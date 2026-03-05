@@ -115,6 +115,16 @@
 - **Load time**: ~90s startup dominated by BM25 pickle (1.9 GB) and parquet read (~1 GB). Acceptable for CLI; a persistent server would be needed for interactive use.
 - **`max_tokens` vs `max_completion_tokens`**: newer OpenAI models (gpt-5.2+) require `max_completion_tokens` parameter; `max_tokens` returns a 400 error.
 
+### TT applicability index (`scripts/build_tt_index.py`)
+- **Input**: `scripts.zip` from each series folder (alongside `docs.zip`). Contains UTF-16BE `.perfsql` files — SQL INSERT statements defining relational data (product hierarchy, technical types, IU-to-document mappings).
+- **Processing**: 706 of 1,476 series processed (770 skipped — missing ViewProducts, TechnicalType, or WebDocIu tables). 10 workers, 168s total.
+- **Output**: 48,655,603 unique `(iu_miuid, tt_id)` applicability pairs across 23,835 unique technical types.
+  - `data/iu_tt_applicability.parquet` — 476.5 MB
+  - `data/technical_types.parquet` — 0.4 MB
+- **Applicability logic**: `WebDocIu` rows have `iu_app_mod` and `iu_app_tt` columns (ICE codes). NULL means "applies to all models/TTs". Non-null values are matched against `model_icecode` and `tt_icecode` sets from `ViewProducts`, grouped by `tt_id`. Only active TTs (`TechnicalType.a_status == 1`) are included.
+- **DuckDB size impact**: loading 48.6M applicability rows into DuckDB inflated the database from ~20 MB to 11.5 GB. The `iu_miuid` string column doesn't compress well in DuckDB vs parquet (476 MB). An indexed `tt_id` lookup takes <100ms at runtime, which is acceptable. Could switch to direct parquet queries if the DB size becomes a problem.
+- **perfsql format**: UTF-16BE with BOM, INSERT line defines columns, data rows are `(val1, 'val2', null)` tuples. Strings use `\'`, `\\`, `\n`, `\r`, `\t` escapes. Numbers are unquoted. `A_STATUS` comes back as int (not string). Empty strings (`''`) are distinct from `null`.
+
 ### Open questions
 - What do the non-EN language IU files contain? Translations or distinct content?
 - What's in the .rdf and .list files?

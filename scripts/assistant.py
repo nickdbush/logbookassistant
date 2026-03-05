@@ -1,7 +1,7 @@
 """RAG assistant for CNH technician documentation.
 
 Usage:
-    .venv/bin/python scripts/assistant.py "query text" [--series SERIES] [--verbose]
+    .venv/bin/python scripts/assistant.py "query text" [--series SERIES] [--vin VIN] [--verbose]
 """
 
 import argparse
@@ -17,6 +17,9 @@ import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from openai import OpenAI
 from qdrant_client import QdrantClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.vin import resolve_vin
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -78,11 +81,12 @@ def expand_query(client, query):
     return lines[:3]
 
 
-def hybrid_search(queries, openai_client, qdrant, bm25, chunk_ids, series_filter=None, series_only=False):
+def hybrid_search(queries, openai_client, qdrant, bm25, chunk_ids, series_filter=None, series_only=False, tt_id=None, tt_only=False):
     """Run vector + BM25 search for each query, merge with RRF."""
-    # Widen retrieval window when filtering to a series
-    vec_k = VECTOR_TOP_K_SERIES if series_filter else VECTOR_TOP_K
-    bm25_k = BM25_TOP_K_SERIES if series_filter else BM25_TOP_K
+    # Widen retrieval window when filtering to a series or TT
+    widen = series_filter or tt_id
+    vec_k = VECTOR_TOP_K_SERIES if widen else VECTOR_TOP_K
+    bm25_k = BM25_TOP_K_SERIES if widen else BM25_TOP_K
 
     # Collect (chunk_id → list of ranks) across all query×method pairs
     all_ranks = {}  # chunk_id → list of (rank,)
@@ -117,6 +121,10 @@ def hybrid_search(queries, openai_client, qdrant, bm25, chunk_ids, series_filter
     # Series boost or filter
     if series_filter:
         rrf_scores = apply_series_boost(rrf_scores, series_filter, series_only=series_only)
+
+    # TT boost or filter
+    if tt_id:
+        rrf_scores = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only)
 
     # Sort by score descending
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -161,6 +169,37 @@ def apply_series_boost(rrf_scores, series_filter, series_only=False, db_path=DUC
         if series_only and not in_series:
             continue
         boosted[cid] = score * 3.0 if in_series else score
+
+    return boosted
+
+
+def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db_path=DUCKDB_PATH):
+    """Boost/filter chunks whose parent IU applies to the given technical type."""
+    db = duckdb.connect(str(db_path), read_only=True)
+
+    # Get set of applicable IU miuids for this TT
+    rows = db.execute(
+        "SELECT iu_miuid FROM iu_tt_applicability WHERE tt_id = ?", [tt_id]
+    ).fetchall()
+    db.close()
+
+    applicable_miuids = {r[0] for r in rows}
+    if not applicable_miuids:
+        return rrf_scores
+
+    # Match chunk canonical IDs to miuids (strip _v1/_v2 suffixes)
+    boosted = {}
+    for cid, score in rrf_scores.items():
+        iu_id = cid.rsplit("_c", 1)[0]
+        # Strip _v1/_v2 suffix to get base miuid
+        base_miuid = iu_id
+        if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
+            base_miuid = base_miuid.rsplit("_v", 1)[0]
+
+        in_tt = base_miuid in applicable_miuids
+        if tt_only and not in_tt:
+            continue
+        boosted[cid] = score * 3.0 if in_tt else score
 
     return boosted
 
@@ -277,6 +316,8 @@ def main():
     parser.add_argument("query", help="Technical question to answer")
     parser.add_argument("--series", help="Series to prioritize (e.g., 'A.A.01.034')")
     parser.add_argument("--series-only", action="store_true", help="Only return results from the specified series")
+    parser.add_argument("--vin", help="VIN to resolve for TT-based filtering")
+    parser.add_argument("--vin-only", action="store_true", help="Only return results applicable to the resolved TT")
     parser.add_argument("--model", default=DEFAULT_GEN_MODEL, help=f"Generation model (default: {DEFAULT_GEN_MODEL})")
     parser.add_argument("--verbose", action="store_true", help="Show retrieval debug info")
     args = parser.parse_args()
@@ -311,6 +352,22 @@ def main():
     load_time = time.time() - t0
     print(f"  Loaded in {load_time:.1f}s", file=sys.stderr)
 
+    # --- VIN Resolution ---
+    tt_id = None
+    if args.vin:
+        print("Resolving VIN...", file=sys.stderr)
+        try:
+            tt_info = resolve_vin(args.vin)
+            tt_id = tt_info["tt_id"]
+            print(f"  Machine: {tt_info['brand_name']} {tt_info['model_name']}", file=sys.stderr)
+            print(f"  TT: {tt_info['tt_name']} (id={tt_id}, code={tt_info['tt_code']})", file=sys.stderr)
+            print(f"  Series: {tt_info['series_name']}", file=sys.stderr)
+            print(f"  Resolved via: {tt_info['source']}", file=sys.stderr)
+        except ValueError as e:
+            print(f"  WARNING: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"  WARNING: VIN resolution failed: {e}", file=sys.stderr)
+
     # --- Step 1: Query Expansion ---
     print("Expanding query...", file=sys.stderr)
     expansions = expand_query(openai_client, args.query)
@@ -324,7 +381,11 @@ def main():
 
     # --- Step 2: Hybrid Retrieval ---
     print("Retrieving...", file=sys.stderr)
-    ranked = hybrid_search(all_queries, openai_client, qdrant, bm25, chunk_ids, args.series, args.series_only)
+    ranked = hybrid_search(
+        all_queries, openai_client, qdrant, bm25, chunk_ids,
+        series_filter=args.series, series_only=args.series_only,
+        tt_id=tt_id, tt_only=args.vin_only,
+    )
 
     if args.verbose:
         print(f"\n{'='*80}")

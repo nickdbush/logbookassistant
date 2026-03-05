@@ -16,6 +16,8 @@ DB_PATH = ROOT / "data" / "metadata.duckdb"
 CANONICAL_IUS_PATH = ROOT / "data" / "corpus" / "canonical_ius_enriched.parquet"
 DOC_STRUCTURE_PATH = ROOT / "data" / "document_structure.parquet"
 CHUNKS_PATH = ROOT / "data" / "corpus" / "chunks.parquet"
+TT_PATH = ROOT / "data" / "technical_types.parquet"
+TT_APP_PATH = ROOT / "data" / "iu_tt_applicability.parquet"
 
 
 def main():
@@ -56,6 +58,31 @@ def main():
     """)
     count = con.execute("SELECT count(*) FROM chunks").fetchone()[0]
     print(f"  {count:,} rows")
+
+    # technical_types (optional — only if parquet exists)
+    if TT_PATH.exists():
+        print(f"Loading technical_types from {TT_PATH.name}...")
+        con.execute(f"""
+            CREATE TABLE technical_types AS
+            SELECT * FROM read_parquet('{TT_PATH}')
+        """)
+        count = con.execute("SELECT count(*) FROM technical_types").fetchone()[0]
+        print(f"  {count:,} rows")
+    else:
+        print(f"Skipping technical_types ({TT_PATH.name} not found)")
+
+    # iu_tt_applicability (optional)
+    if TT_APP_PATH.exists():
+        print(f"Loading iu_tt_applicability from {TT_APP_PATH.name}...")
+        con.execute(f"""
+            CREATE TABLE iu_tt_applicability AS
+            SELECT * FROM read_parquet('{TT_APP_PATH}')
+        """)
+        con.execute("CREATE INDEX idx_tt_app ON iu_tt_applicability(tt_id)")
+        count = con.execute("SELECT count(*) FROM iu_tt_applicability").fetchone()[0]
+        print(f"  {count:,} rows")
+    else:
+        print(f"Skipping iu_tt_applicability ({TT_APP_PATH.name} not found)")
 
     # Print summary
     print(f"\nDatabase: {DB_PATH}")

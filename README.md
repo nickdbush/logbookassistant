@@ -13,6 +13,10 @@ into a searchable corpus for technician Q&A.
 .venv/bin/python scripts/assistant.py "How to diagnose fault code 523774"
 .venv/bin/python scripts/assistant.py "hydraulic pump pressure test" --series A.A.01.034
 .venv/bin/python scripts/assistant.py "SCR aftertreatment DPF regen" --verbose
+
+# Filter by VIN (resolves to technical type, boosts applicable IUs 3x)
+.venv/bin/python scripts/assistant.py "hydraulic fault" --vin HACT7210VPD100757
+.venv/bin/python scripts/assistant.py "hydraulic fault" --vin HACT7210VPD100757 --vin-only
 ```
 
 ## Pipeline
@@ -78,7 +82,16 @@ Source data lives on an external drive at `/Volumes/logbookdata/`.
 
 **Outputs**: `data/corpus/embeddings.npy` (~9.2 GB), `data/corpus/chunk_ids.npy`
 
-### Stage 7: Index
+### Stage 7: TT applicability index
+
+```bash
+# Build IU-to-technical-type applicability from scripts.zip (requires source volume)
+.venv/bin/python scripts/build_tt_index.py
+```
+
+**Outputs**: `data/iu_tt_applicability.parquet` (48.6M pairs), `data/technical_types.parquet` (23.8K TTs)
+
+### Stage 8: Index
 
 ```bash
 # Start Qdrant (Docker required)
@@ -92,10 +105,11 @@ docker run -d -p 6333:6333 -p 6334:6334 \
 
 **Outputs**: Qdrant collection `chunks`, `data/bm25_index.pkl`, `data/metadata.duckdb`
 
-### Stage 8: Query
+### Stage 9: Query
 
 ```bash
 .venv/bin/python scripts/assistant.py "your question here"
+.venv/bin/python scripts/assistant.py "hydraulic fault" --vin HACT7210VPD100757
 ```
 
 ## Project structure
@@ -106,6 +120,8 @@ scripts/
     decrypt.py          # Blowfish decrypt + zip helpers
     metadata.py         # XML metadata extraction (fault codes, parts, etc.)
     xml_to_html.py      # Arbortext XML → HTML conversion engine
+    perfsql.py          # UTF-16BE perfsql file parser
+    vin.py              # VIN → technical type resolution (S3 + CNH API)
   profile_dedup.py      # Stage 1: cross-series dedup profiling
   build_canonical.py    # Stage 1: canonical IU resolution
   convert_corpus.py     # Stage 2: full corpus conversion
@@ -113,9 +129,10 @@ scripts/
   build_doc_structure.py# Stage 4: document→IU ordering
   chunk_corpus.py       # Stage 5: chunking for RAG
   embed_batch.py        # Stage 6: OpenAI embeddings
-  build_vector_store.py # Stage 7: Qdrant + BM25
-  build_metadata_db.py  # Stage 7: DuckDB metadata
-  assistant.py          # Stage 8: RAG assistant (entrypoint)
+  build_tt_index.py     # Stage 7: TT applicability index from scripts.zip
+  build_vector_store.py # Stage 8: Qdrant + BM25
+  build_metadata_db.py  # Stage 8: DuckDB metadata
+  assistant.py          # Stage 9: RAG assistant (entrypoint)
   test_retrieval.py     # Sanity check: run test queries against indices
 config/
   tag_map.yaml          # Arbortext XML tag → HTML mapping (236 tags)
@@ -138,3 +155,5 @@ data/                   # Generated data (gitignored, ~25 GB total)
   from genuinely different documents sharing the same IU ID
 - **Hybrid retrieval**: vector (cosine) + BM25 (keyword), fused with RRF
 - **Query expansion**: gpt-4o-mini generates 3 alternative queries for broader recall
+- **VIN-based filtering**: resolve VIN → technical type via S3 shard or CNH Store
+  API, then boost/filter IUs by TT applicability from `WebDocIu` tables
