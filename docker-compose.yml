@@ -2,7 +2,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.13.6
     volumes:
-      - ${DATA_DIR:-./data}/qdrant_storage:/qdrant/storage:ro
+      - ${DATA_DIR:-./data}/qdrant_storage:/qdrant/storage
     restart: unless-stopped
 
   api:
