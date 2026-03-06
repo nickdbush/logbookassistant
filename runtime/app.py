@@ -41,7 +41,7 @@ class QueryRequest(BaseModel):
     identifier: str | None = None
     vin: str | None = None  # backward compat alias for identifier
     vin_only: bool = False
-    model: str = "gpt-4o"
+    model: str = "gpt-5-mini"
 
 
 class QueryResponse(BaseModel):

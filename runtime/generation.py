@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-DEFAULT_GEN_MODEL = "gpt-4o"
+DEFAULT_GEN_MODEL = "gpt-5-mini"
 
 SYSTEM_PROMPT = """\
 You are a CNH technical assistant helping equipment dealers diagnose and repair \
@@ -22,9 +22,9 @@ Guidelines:
 
 
 async def expand_query(client, query: str) -> list[str]:
-    """Generate 3 alternative queries using gpt-4o-mini."""
+    """Generate 3 alternative queries using gpt-5-nano."""
     resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-nano",
         messages=[
             {
                 "role": "system",

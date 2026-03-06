@@ -31,7 +31,7 @@ DUCKDB_PATH = ROOT / "data" / "metadata.duckdb"
 QDRANT_URL = "http://localhost:6333"
 COLLECTION_NAME = "chunks"
 EMBED_MODEL = "text-embedding-3-small"
-DEFAULT_GEN_MODEL = "gpt-4o"
+DEFAULT_GEN_MODEL = "gpt-5-mini"
 
 VECTOR_TOP_K = 20
 VECTOR_TOP_K_SERIES = 200
@@ -58,9 +58,9 @@ def embed_query(client, text):
 
 
 def expand_query(client, query):
-    """Generate 3 alternative queries using gpt-4o-mini."""
+    """Generate 3 alternative queries using gpt-5-nano."""
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-5-nano",
         messages=[
             {
                 "role": "system",
