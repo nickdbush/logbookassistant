@@ -125,6 +125,12 @@
 - **DuckDB size impact**: loading 48.6M applicability rows into DuckDB inflated the database from ~20 MB to 11.5 GB. The `iu_miuid` string column doesn't compress well in DuckDB vs parquet (476 MB). An indexed `tt_id` lookup takes <100ms at runtime, which is acceptable. Could switch to direct parquet queries if the DB size becomes a problem.
 - **perfsql format**: UTF-16BE with BOM, INSERT line defines columns, data rows are `(val1, 'val2', null)` tuples. Strings use `\'`, `\\`, `\n`, `\r`, `\t` escapes. Numbers are unquoted. `A_STATUS` comes back as int (not string). Empty strings (`''`) are distinct from `null`.
 
+### IU titles
+- **99.9998% of IUs have a usable title** extracted from the first markdown heading in `content_md` (only 2 of 930,082 IUs lack one).
+- Titles are descriptive and human-readable: e.g., "Engine - Overview", "Turbocharger oil supply line - Remove", "Engine - General specification".
+- Currently extracted post-conversion from the markdown heading. In future, titles should be extracted directly from the original Arbortext XML (`Full_Title`, `Title`, `Header` elements) before HTML conversion — this would preserve the semantic distinction between primary and secondary titles, and avoid dependence on the conversion pipeline.
+- Title added as a dedicated column in enriched parquet and surfaced in the API sources list.
+
 ### Open questions
 - What do the non-EN language IU files contain? Translations or distinct content?
 - What's in the .rdf and .list files?

@@ -10,6 +10,7 @@ Steps:
 """
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -50,6 +51,7 @@ OUTPUT_SCHEMA = pa.schema([
     ("configuration", pa.string()),
     ("fcr_chains", pa.string()),
     # Derived
+    ("title", pa.string()),
     ("has_tables", pa.bool_()),
     ("has_images", pa.bool_()),
     ("estimated_tokens", pa.int32()),
@@ -76,6 +78,12 @@ def enrich_batch(batch: pa.RecordBatch) -> list[dict]:
         content_html = rows["content_html"][i] or ""
         content_md = rows["content_md"][i] or ""
 
+        # Extract title from first markdown heading
+        title = ""
+        heading_match = re.match(r"^#+\s+(.+)", content_md)
+        if heading_match:
+            title = heading_match.group(1).strip()
+
         row = {
             "canonical_id": rows["canonical_id"][i],
             "content_type": rows["iu_type"][i],
@@ -86,6 +94,7 @@ def enrich_batch(batch: pa.RecordBatch) -> list[dict]:
             "md_length": rows["md_length"][i],
             "conversion_error": rows["conversion_error"][i],
             # Derived
+            "title": title,
             "has_tables": "<table" in content_html.lower(),
             "has_images": "<img" in content_html.lower(),
             "estimated_tokens": len(content_md) // 4,

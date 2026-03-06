@@ -226,16 +226,18 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
         # Get parent IU metadata
         iu_id = cid.rsplit("_c", 1)[0]
         iu_row = db.execute(
-            "SELECT content_type, fault_codes, iu_cross_references, appearances FROM canonical_ius WHERE canonical_id = ?",
+            "SELECT content_type, fault_codes, iu_cross_references, appearances, title FROM canonical_ius WHERE canonical_id = ?",
             [iu_id],
         ).fetchone()
 
         series_list = ""
         content_type = content_types[idx] or "unknown"
+        title = ""
         if iu_row:
             content_type = iu_row[0] or content_type
             apps = parse_list_field(iu_row[3])
             series_list = ", ".join(sorted({a["series"] for a in apps if isinstance(a, dict) and "series" in a}))
+            title = iu_row[4] or ""
 
         # Pull adjacent chunks if multi-chunk IU
         full_text = chunk_text
@@ -259,11 +261,12 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
 
         total_tokens += tokens
 
-        block = f"[Source: {iu_id} | Type: {content_type} | Series: {series_list}]\n{full_text}"
+        block = f"[Source: {iu_id} | {title} | Type: {content_type} | Series: {series_list}]\n{full_text}"
         context_blocks.append(block)
 
         sources.append({
             "iu_id": iu_id,
+            "title": title,
             "content_type": content_type,
             "series": series_list,
             "rrf_score": rrf_score,
@@ -420,7 +423,7 @@ def main():
     print("SOURCES")
     print(f"{'='*80}")
     for s in sources:
-        print(f"  IU {s['iu_id']}  |  {s['content_type']}")
+        print(f"  IU {s['iu_id']}  |  {s['title'] or s['content_type']}")
         if s['series']:
             print(f"    Series: {s['series']}")
 
