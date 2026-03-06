@@ -93,7 +93,7 @@ async def expand_query(client, query: str) -> list[str]:
             },
             {"role": "user", "content": query},
         ],
-        max_completion_tokens=200,
+        max_completion_tokens=400,
     )
     lines = [line.strip() for line in resp.choices[0].message.content.strip().split("\n") if line.strip()]
     expansions = lines[:3]

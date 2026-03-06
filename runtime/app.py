@@ -317,6 +317,7 @@ async def query(req: QueryRequest):
             expansions, expansion_mc = await expand_query(app.state.openai, req.query)
             spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
 
+        logger.info("Query expansions: %r", expansions)
         if expansion_mc:
             model_calls.append(ModelCall(**expansion_mc))
         all_queries = [req.query] + expansions
