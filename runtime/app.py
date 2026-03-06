@@ -31,6 +31,7 @@ from retrieval import assemble_context, hybrid_search
 from vin import resolve_identifier
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("assistant")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
