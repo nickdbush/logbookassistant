@@ -75,7 +75,6 @@ def expand_query(client, query):
             },
             {"role": "user", "content": query},
         ],
-        temperature=0.7,
         max_completion_tokens=200,
     )
     lines = [l.strip() for l in resp.choices[0].message.content.strip().split("\n") if l.strip()]
@@ -309,7 +308,6 @@ Please answer the question using the documentation above. Cite sources using [So
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ],
-        temperature=0.2,
         max_completion_tokens=2000,
     )
     return resp.choices[0].message.content
