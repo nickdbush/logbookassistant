@@ -1,7 +1,7 @@
 """RAG assistant for CNH technician documentation.
 
 Usage:
-    .venv/bin/python scripts/assistant.py "query text" [--series SERIES] [--vin VIN] [--verbose]
+    .venv/bin/python scripts/assistant.py "query text" [--series SERIES] [--identifier ID] [--verbose]
 """
 
 import argparse
@@ -19,7 +19,7 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from lib.vin import resolve_vin
+from lib.vin import resolve_identifier
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -319,7 +319,7 @@ def main():
     parser.add_argument("query", help="Technical question to answer")
     parser.add_argument("--series", help="Series to prioritize (e.g., 'A.A.01.034')")
     parser.add_argument("--series-only", action="store_true", help="Only return results from the specified series")
-    parser.add_argument("--vin", help="VIN to resolve for TT-based filtering")
+    parser.add_argument("--identifier", "--vin", dest="identifier", help="VIN or VRM to resolve for TT-based filtering")
     parser.add_argument("--vin-only", action="store_true", help="Only return results applicable to the resolved TT")
     parser.add_argument("--model", default=DEFAULT_GEN_MODEL, help=f"Generation model (default: {DEFAULT_GEN_MODEL})")
     parser.add_argument("--verbose", action="store_true", help="Show retrieval debug info")
@@ -355,21 +355,24 @@ def main():
     load_time = time.time() - t0
     print(f"  Loaded in {load_time:.1f}s", file=sys.stderr)
 
-    # --- VIN Resolution ---
+    # --- Identifier Resolution ---
     tt_id = None
-    if args.vin:
-        print("Resolving VIN...", file=sys.stderr)
+    if args.identifier:
+        print("Resolving identifier...", file=sys.stderr)
         try:
-            tt_info = resolve_vin(args.vin)
+            tt_info = resolve_identifier(args.identifier)
             tt_id = tt_info["tt_id"]
             print(f"  Machine: {tt_info['brand_name']} {tt_info['model_name']}", file=sys.stderr)
             print(f"  TT: {tt_info['tt_name']} (id={tt_id}, code={tt_info['tt_code']})", file=sys.stderr)
             print(f"  Series: {tt_info['series_name']}", file=sys.stderr)
-            print(f"  Resolved via: {tt_info['source']}", file=sys.stderr)
+            if tt_info.get("vin"):
+                print(f"  VIN: {tt_info['vin']}", file=sys.stderr)
+            if tt_info.get("vrm"):
+                print(f"  VRM: {tt_info['vrm']}", file=sys.stderr)
         except ValueError as e:
             print(f"  WARNING: {e}", file=sys.stderr)
         except Exception as e:
-            print(f"  WARNING: VIN resolution failed: {e}", file=sys.stderr)
+            print(f"  WARNING: Identifier resolution failed: {e}", file=sys.stderr)
 
     # --- Step 1: Query Expansion ---
     print("Expanding query...", file=sys.stderr)

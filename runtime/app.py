@@ -22,7 +22,7 @@ from qdrant_client import QdrantClient
 
 from generation import expand_query, generate_answer
 from retrieval import assemble_context, hybrid_search
-from vin import resolve_vin
+from vin import resolve_identifier
 
 load_dotenv()
 logger = logging.getLogger("assistant")
@@ -38,7 +38,8 @@ class QueryRequest(BaseModel):
     query: str
     series: str | None = None
     series_only: bool = False
-    vin: str | None = None
+    identifier: str | None = None
+    vin: str | None = None  # backward compat alias for identifier
     vin_only: bool = False
     model: str = "gpt-4o"
 
@@ -133,15 +134,16 @@ async def health():
 async def query(req: QueryRequest):
     t0 = time.time()
 
-    # VIN resolution
+    # Identifier resolution (VIN or VRM)
     vin_info = None
     tt_id = None
-    if req.vin:
+    machine_id = req.identifier or req.vin
+    if machine_id:
         try:
-            vin_info = await asyncio.to_thread(resolve_vin, req.vin)
+            vin_info = await asyncio.to_thread(resolve_identifier, machine_id)
             tt_id = vin_info["tt_id"]
         except (ValueError, Exception) as e:
-            logger.warning("VIN resolution failed: %s", e)
+            logger.warning("Identifier resolution failed: %s", e)
 
     # Query expansion
     expansions = await expand_query(app.state.openai, req.query)
