@@ -7,6 +7,7 @@ Usage:
 import argparse
 import json
 import pickle
+import re
 import sys
 import time
 from pathlib import Path
@@ -191,10 +192,8 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db_path=DUCKDB_PATH):
     boosted = {}
     for cid, score in rrf_scores.items():
         iu_id = cid.rsplit("_c", 1)[0]
-        # Strip _v1/_v2 suffix to get base miuid
-        base_miuid = iu_id
-        if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
-            base_miuid = base_miuid.rsplit("_v", 1)[0]
+        # Strip _vN suffix to get base miuid
+        base_miuid = re.sub(r"_v\d+$", "", iu_id)
 
         in_tt = base_miuid in applicable_miuids
         if tt_only and not in_tt:
