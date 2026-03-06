@@ -123,12 +123,13 @@ def hybrid_search(queries, openai_client, qdrant, bm25, chunk_ids, series_filter
         rrf_scores = apply_series_boost(rrf_scores, series_filter, series_only=series_only)
 
     # TT boost or filter
+    applicable_miuids = None
     if tt_id:
-        rrf_scores = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only)
+        rrf_scores, applicable_miuids = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only)
 
     # Sort by score descending
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    return ranked
+    return ranked, applicable_miuids
 
 
 def apply_series_boost(rrf_scores, series_filter, series_only=False, db_path=DUCKDB_PATH):
@@ -185,7 +186,7 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db_path=DUCKDB_PATH):
 
     applicable_miuids = {r[0] for r in rows}
     if not applicable_miuids:
-        return rrf_scores
+        return rrf_scores, applicable_miuids
 
     # Match chunk canonical IDs to miuids (strip _v1/_v2 suffixes)
     boosted = {}
@@ -199,10 +200,10 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db_path=DUCKDB_PATH):
             continue
         boosted[cid] = score * 3.0 if in_tt else score
 
-    return boosted
+    return boosted, applicable_miuids
 
 
-def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx, num_chunks_arr, chunk_indices_arr, series_filter=None):
+def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx, num_chunks_arr, chunk_indices_arr, series_filter=None, applicable_miuids=None):
     """Assemble context from top chunks, respecting token budget."""
     db = duckdb.connect(str(DUCKDB_PATH), read_only=True)
 
@@ -233,7 +234,10 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
         title = ""
         if iu_row:
             content_type = iu_row[0] or content_type
-            if series_filter:
+            if applicable_miuids:
+                base_miuid = re.sub(r"_v\d+$", "", iu_id)
+                in_target_series = base_miuid in applicable_miuids
+            elif series_filter:
                 apps = parse_list_field(iu_row[3])
                 iu_series = {a["series"] for a in apps if isinstance(a, dict) and "series" in a}
                 in_target_series = series_filter in iu_series
@@ -386,7 +390,7 @@ def main():
 
     # --- Step 2: Hybrid Retrieval ---
     print("Retrieving...", file=sys.stderr)
-    ranked = hybrid_search(
+    ranked, applicable_miuids = hybrid_search(
         all_queries, openai_client, qdrant, bm25, chunk_ids,
         series_filter=args.series, series_only=args.series_only,
         tt_id=tt_id, tt_only=args.vin_only,
@@ -408,6 +412,7 @@ def main():
         ranked, chunk_ids, texts, content_types, token_counts,
         id_to_idx, num_chunks_arr, chunk_indices_arr,
         series_filter=args.series,
+        applicable_miuids=applicable_miuids,
     )
 
     # --- Step 4: Generation ---

@@ -178,7 +178,7 @@ async def hybrid_search(
         spans.append({"name": "tt_boost", "duration_ms": int((time.time() - t) * 1000)})
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    return ranked, spans, model_calls
+    return ranked, spans, model_calls, applicable_miuids
 
 
 def _apply_series_boost_cached(rrf_scores, series_filter, iu_series_map, series_only=False):
@@ -224,7 +224,7 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db=None, applicable_miuids
 def assemble_context(
     ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx,
     num_chunks_arr, chunk_indices_arr, series_filter=None,
-    iu_series_map=None, db=None,
+    iu_series_map=None, db=None, applicable_miuids=None,
 ):
     """Assemble context from top chunks, respecting token budget."""
     # Batch-fetch metadata for the small number of IUs we'll actually use
@@ -269,7 +269,12 @@ def assemble_context(
         if iu_row:
             content_type = iu_row[0] or content_type
             title = iu_row[1] or ""
-        if series_filter and iu_series_map:
+        if applicable_miuids:
+            base_miuid = iu_id
+            if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
+                base_miuid = base_miuid.rsplit("_v", 1)[0]
+            in_target_series = base_miuid in applicable_miuids
+        elif series_filter and iu_series_map:
             in_target_series = series_filter in iu_series_map.get(iu_id, frozenset())
 
         # Pull adjacent chunks if multi-chunk IU

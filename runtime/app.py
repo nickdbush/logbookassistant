@@ -321,7 +321,7 @@ async def query(req: QueryRequest):
 
         # Hybrid retrieval
         t_retrieval = time.time()
-        ranked, retrieval_spans, retrieval_mcs = await hybrid_search(
+        ranked, retrieval_spans, retrieval_mcs, applicable_miuids = await hybrid_search(
             all_queries,
             app.state.openai,
             app.state.qdrant,
@@ -354,6 +354,7 @@ async def query(req: QueryRequest):
             series_filter=req.series,
             iu_series_map=app.state.iu_series_map,
             db=app.state.duckdb,
+            applicable_miuids=applicable_miuids,
         )
         spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 
