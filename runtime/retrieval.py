@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import duckdb
 import numpy as np
+
+from generation import estimate_cost
 
 EMBED_MODEL = "text-embedding-3-small"
 COLLECTION_NAME = "chunks"
@@ -36,9 +39,9 @@ def parse_list_field(val):
         return [val] if val else []
 
 
-async def embed_query(client, text: str) -> list[float]:
+async def embed_query(client, text: str):
     resp = await client.embeddings.create(model=EMBED_MODEL, input=[text])
-    return resp.data[0].embedding
+    return resp.data[0].embedding, resp.usage.prompt_tokens
 
 
 async def hybrid_search(
@@ -58,16 +61,31 @@ async def hybrid_search(
     bm25_k = BM25_TOP_K_SERIES if widen else BM25_TOP_K
 
     all_ranks: dict[str, list[int]] = {}
+    spans = []
+    model_calls = []
 
-    for query in queries:
-        # Vector search (async embed, sync qdrant query via thread)
-        query_vec = await embed_query(openai_client, query)
+    for i, query in enumerate(queries):
+        # Embed
+        t = time.time()
+        query_vec, embed_tokens = await embed_query(openai_client, query)
+        spans.append({"name": f"embed_query #{i}", "duration_ms": int((time.time() - t) * 1000)})
+        model_calls.append({
+            "name": f"embed_query #{i}",
+            "model": EMBED_MODEL,
+            "input_tokens": embed_tokens,
+            "output_tokens": 0,
+            "cost_usd": estimate_cost(EMBED_MODEL, embed_tokens, 0),
+        })
+
+        # Qdrant search
+        t = time.time()
         response = await asyncio.to_thread(
             qdrant.query_points,
             collection_name=COLLECTION_NAME,
             query=query_vec,
             limit=vec_k,
         )
+        spans.append({"name": f"qdrant_search #{i}", "duration_ms": int((time.time() - t) * 1000)})
         for rank, hit in enumerate(response.points):
             cid = hit.payload["chunk_id"]
             all_ranks.setdefault(cid, []).append(rank)
@@ -84,25 +102,33 @@ async def hybrid_search(
                 results.append((rank_i, chunk_ids[idx]))
             return results
 
+        t = time.time()
         bm25_results = await asyncio.to_thread(_bm25_search)
+        spans.append({"name": f"bm25_search #{i}", "duration_ms": int((time.time() - t) * 1000)})
         for rank, cid in bm25_results:
             all_ranks.setdefault(cid, []).append(rank)
 
     # RRF scoring
+    t = time.time()
     rrf_scores = {}
     for cid, ranks in all_ranks.items():
         rrf_scores[cid] = sum(1.0 / (RRF_K + r) for r in ranks)
+    spans.append({"name": "rrf_ranking", "duration_ms": int((time.time() - t) * 1000)})
 
     # Series boost or filter
     if series_filter:
+        t = time.time()
         rrf_scores = apply_series_boost(rrf_scores, series_filter, series_only=series_only)
+        spans.append({"name": "series_boost", "duration_ms": int((time.time() - t) * 1000)})
 
     # TT boost or filter
     if tt_id:
+        t = time.time()
         rrf_scores = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only)
+        spans.append({"name": "tt_boost", "duration_ms": int((time.time() - t) * 1000)})
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    return ranked
+    return ranked, spans, model_calls
 
 
 def apply_series_boost(rrf_scores, series_filter, series_only=False):

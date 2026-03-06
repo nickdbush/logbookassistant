@@ -44,11 +44,26 @@ class QueryRequest(BaseModel):
     model: str = "gpt-5-mini"
 
 
+class Span(BaseModel):
+    name: str
+    duration_ms: int
+
+
+class ModelCall(BaseModel):
+    name: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
 class QueryResponse(BaseModel):
     answer: str
     sources: list[dict]
     vin_info: dict | None = None
     timing: dict
+    spans: list[Span]
+    model_calls: list[ModelCall]
 
 
 # --- Lifespan ---
@@ -133,25 +148,32 @@ async def health():
 @app.post("/query", response_model=QueryResponse, dependencies=[Depends(verify_bearer_token)])
 async def query(req: QueryRequest):
     t0 = time.time()
+    spans = []
+    model_calls = []
 
     # Identifier resolution (VIN or VRM)
     vin_info = None
     tt_id = None
     machine_id = req.identifier or req.vin
     if machine_id:
+        t = time.time()
         try:
             vin_info = await asyncio.to_thread(resolve_identifier, machine_id)
             tt_id = vin_info["tt_id"]
         except (ValueError, Exception) as e:
             logger.warning("Identifier resolution failed: %s", e)
+        spans.append(Span(name="vin_resolution", duration_ms=int((time.time() - t) * 1000)))
 
     # Query expansion
-    expansions = await expand_query(app.state.openai, req.query)
+    t = time.time()
+    expansions, expansion_mc = await expand_query(app.state.openai, req.query)
+    spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t) * 1000)))
+    model_calls.append(ModelCall(**expansion_mc))
     all_queries = [req.query] + expansions
 
     # Hybrid retrieval
     t_retrieval = time.time()
-    ranked = await hybrid_search(
+    ranked, retrieval_spans, retrieval_mcs = await hybrid_search(
         all_queries,
         app.state.openai,
         app.state.qdrant,
@@ -163,8 +185,11 @@ async def query(req: QueryRequest):
         tt_only=req.vin_only,
     )
     retrieval_ms = int((time.time() - t_retrieval) * 1000)
+    spans.extend(Span(**s) for s in retrieval_spans)
+    model_calls.extend(ModelCall(**mc) for mc in retrieval_mcs)
 
     # Context assembly
+    t = time.time()
     context, sources = await asyncio.to_thread(
         assemble_context,
         ranked,
@@ -177,11 +202,14 @@ async def query(req: QueryRequest):
         app.state.chunk_indices_arr,
         series_filter=req.series,
     )
+    spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 
     # Generation
     t_gen = time.time()
-    answer = await generate_answer(app.state.openai, req.query, context, sources, model=req.model)
+    answer, gen_mc = await generate_answer(app.state.openai, req.query, context, sources, model=req.model)
     generation_ms = int((time.time() - t_gen) * 1000)
+    spans.append(Span(name="generation", duration_ms=int((time.time() - t_gen) * 1000)))
+    model_calls.append(ModelCall(**gen_mc))
 
     total_ms = int((time.time() - t0) * 1000)
 
@@ -194,4 +222,6 @@ async def query(req: QueryRequest):
             "generation_ms": generation_ms,
             "total_ms": total_ms,
         },
+        spans=spans,
+        model_calls=model_calls,
     )
