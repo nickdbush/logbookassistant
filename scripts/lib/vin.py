@@ -94,13 +94,14 @@ def _lookup_tt_info(tt_id: int, db_path: Path) -> dict | None:
     try:
         row = db.execute(
             "SELECT tt_id, tt_code, brand_name, series_name, model_name, "
-            "tt_name, series_icecode FROM technical_types WHERE tt_id = ?",
+            "tt_name, series_icecode, sn_min, sn_max "
+            "FROM technical_types WHERE tt_id = ?",
             [tt_id],
         ).fetchone()
         if row:
             return dict(zip(
                 ["tt_id", "tt_code", "brand_name", "series_name",
-                 "model_name", "tt_name", "series_icecode"],
+                 "model_name", "tt_name", "series_icecode", "sn_min", "sn_max"],
                 row,
             ))
     finally:
@@ -212,7 +213,8 @@ def _tt_code_to_info(tt_code: str, vin: str, db_path: Path) -> dict | None:
     try:
         rows = db.execute(
             "SELECT tt_id, tt_code, brand_name, series_name, model_name, "
-            "tt_name, series_icecode FROM technical_types WHERE tt_code = ?",
+            "tt_name, series_icecode, sn_min, sn_max "
+            "FROM technical_types WHERE tt_code = ?",
             [tt_code],
         ).fetchall()
     finally:
@@ -222,23 +224,22 @@ def _tt_code_to_info(tt_code: str, vin: str, db_path: Path) -> dict | None:
         return None
 
     cols = ["tt_id", "tt_code", "brand_name", "series_name",
-            "model_name", "tt_name", "series_icecode"]
+            "model_name", "tt_name", "series_icecode", "sn_min", "sn_max"]
 
     if len(rows) == 1:
         return dict(zip(cols, rows[0]))
 
-    # Multiple matches — need serial range disambiguation
-    # Look up TechnicalType serial ranges from DuckDB
-    # For now, just return the first match
-    # TODO: full serial range disambiguation requires TechnicalType data in DuckDB
-    return dict(zip(cols, rows[0]))
+    # Multiple matches — disambiguate with serial range
+    for row in rows:
+        info = dict(zip(cols, row))
+        if _vin_in_range(vin, info.get("sn_min"), info.get("sn_max")):
+            return info
+
+    return None
 
 
-def vin_matches_pattern(vin: str, pattern: str) -> bool:
-    """Check if VIN matches a wildcard pattern (from tt_code or serial range).
-
-    '*' in pattern matches any character at that position.
-    """
+def _vin_matches_pattern(vin: str, pattern: str) -> bool:
+    """Check if VIN matches a wildcard pattern ('*' matches any char)."""
     if len(vin) != len(pattern):
         return False
     for v, p in zip(vin, pattern):
@@ -249,36 +250,27 @@ def vin_matches_pattern(vin: str, pattern: str) -> bool:
     return True
 
 
-def vin_in_range(vin: str, sn_min: str | None, sn_max: str | None) -> bool:
-    """Check if VIN falls within a serial number range (wildcard-aware).
-
-    Uses sn_min's '*' positions as the mask. At non-wildcard positions,
-    checks vin >= sn_min and vin <= sn_max lexicographically.
-    NULL/empty min means indeterminate → True. NULL/empty max → open-ended.
-    """
-    if not sn_min or sn_min.upper() == "NULL":
+def _vin_in_range(vin: str, sn_min: str | None, sn_max: str | None) -> bool:
+    """Check if VIN falls within a serial range (wildcard-aware)."""
+    if not sn_min:
         return True
 
     # Clean trailing ' -' from min values (seen in TechnicalType data)
     sn_min = sn_min.rstrip().rstrip("-").rstrip()
 
-    if len(vin) != len(sn_min):
-        return True  # indeterminate
-
-    # Build wildcard mask from sn_min
-    mask = [c != "*" for c in sn_min]
-
-    masked_vin = "".join(vin[i] for i in range(len(vin)) if mask[i])
-    masked_min = "".join(sn_min[i] for i in range(len(sn_min)) if mask[i])
-
-    if masked_vin < masked_min:
+    if not _vin_matches_pattern(vin, sn_min):
         return False
 
-    if not sn_max or sn_max.upper() == "NULL" or sn_max == "":
-        return True  # open-ended
-
-    if len(vin) != len(sn_max):
+    if not sn_max:
         return True
 
-    masked_max = "".join(sn_max[i] for i in range(len(sn_max)) if i < len(mask) and mask[i])
-    return masked_vin <= masked_max
+    # Compare at non-wildcard positions only
+    for i in range(min(len(vin), len(sn_max))):
+        if sn_max[i] == "*":
+            continue
+        if vin[i] < sn_max[i]:
+            return True
+        if vin[i] > sn_max[i]:
+            return False
+
+    return True

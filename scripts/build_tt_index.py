@@ -34,7 +34,7 @@ VP_COLUMNS = [
     "MODEL_NAME", "MODEL_ICECODE",
     "TT_ID", "TT_ICECODE", "TT_CODE", "TT_NAME",
 ]
-TT_COLUMNS = ["A_ID", "A_CODE", "A_STATUS"]
+TT_COLUMNS = ["A_ID", "A_CODE", "A_STATUS", "A_MIN", "A_MAX"]
 WDI_COLUMNS = ["IU_MASTERIUREF", "IU_APP_MOD", "IU_APP_TT"]
 
 
@@ -90,15 +90,21 @@ def process_series(series: str) -> tuple[list[tuple], list[dict]] | None:
                 zf.read("common/TechnicalType.perfsql"), columns=TT_COLUMNS
             )
             active_tt_ids = set()
+            tt_serial_ranges = {}  # A_ID → (A_MIN, A_MAX)
             for r in tt_rows:
                 # A_STATUS can be int 1 or string '1'
                 if str(r.get("A_STATUS")) == "1":
                     active_tt_ids.add(r["A_ID"])
+                    tt_serial_ranges[r["A_ID"]] = (r.get("A_MIN"), r.get("A_MAX"))
 
-            # Filter tt_products to active only
-            active_products = {
-                tid: v for tid, v in tt_products.items() if tid in active_tt_ids
-            }
+            # Filter tt_products to active only, add serial ranges
+            active_products = {}
+            for tid, v in tt_products.items():
+                if tid in active_tt_ids:
+                    sn_min, sn_max = tt_serial_ranges.get(tid, (None, None))
+                    v["info"]["sn_min"] = sn_min
+                    v["info"]["sn_max"] = sn_max
+                    active_products[tid] = v
             if not active_products:
                 return None
 
