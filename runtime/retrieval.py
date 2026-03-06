@@ -175,7 +175,7 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False):
     return boosted
 
 
-def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx, num_chunks_arr, chunk_indices_arr):
+def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx, num_chunks_arr, chunk_indices_arr, series_filter=None):
     """Assemble context from top chunks, respecting token budget."""
     db_path = _data_dir() / "metadata.duckdb"
     db = duckdb.connect(str(db_path), read_only=True)
@@ -201,13 +201,15 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
             [iu_id],
         ).fetchone()
 
-        series_list = ""
+        in_target_series = False
         content_type = content_types[idx] or "unknown"
         title = ""
         if iu_row:
             content_type = iu_row[0] or content_type
-            apps = parse_list_field(iu_row[3])
-            series_list = ", ".join(sorted({a["series"] for a in apps if isinstance(a, dict) and "series" in a}))
+            if series_filter:
+                apps = parse_list_field(iu_row[3])
+                iu_series = {a["series"] for a in apps if isinstance(a, dict) and "series" in a}
+                in_target_series = series_filter in iu_series
             title = iu_row[4] or ""
 
         # Pull adjacent chunks if multi-chunk IU
@@ -231,14 +233,14 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
 
         total_tokens += tokens
 
-        block = f"[Source: {iu_id} | {title} | Type: {content_type} | Series: {series_list}]\n{full_text}"
+        block = f"[Source: {iu_id} | {title} | Type: {content_type}]\n{full_text}"
         context_blocks.append(block)
 
         sources.append({
             "iu_id": iu_id,
             "title": title,
             "content_type": content_type,
-            "series": series_list,
+            "in_target_series": in_target_series,
             "rrf_score": rrf_score,
         })
 

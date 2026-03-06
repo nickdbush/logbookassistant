@@ -175,6 +175,7 @@ async def query(req: QueryRequest):
         app.state.id_to_idx,
         app.state.num_chunks_arr,
         app.state.chunk_indices_arr,
+        series_filter=req.series,
     )
 
     # Generation
