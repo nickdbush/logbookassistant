@@ -76,7 +76,7 @@ def expand_query(client, query):
             {"role": "user", "content": query},
         ],
         temperature=0.7,
-        max_tokens=200,
+        max_completion_tokens=200,
     )
     lines = [l.strip() for l in resp.choices[0].message.content.strip().split("\n") if l.strip()]
     return lines[:3]
