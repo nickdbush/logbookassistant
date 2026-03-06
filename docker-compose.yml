@@ -1,6 +1,6 @@
 services:
   qdrant:
-    image: qdrant/qdrant:v1.13.6
+    image: qdrant/qdrant:v1.17.0
     volumes:
       - ${DATA_DIR:-./data}/qdrant_storage:/qdrant/storage
     restart: unless-stopped
