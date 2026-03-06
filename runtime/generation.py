@@ -14,6 +14,7 @@ DEFAULT_GEN_MODEL = "claude-sonnet-4-6"
 
 MODEL_PRICING = {
     "gpt-5-nano":  {"input": 0.05,  "output": 0.40},
+    "gpt-4o-mini": {"input": 0.15,  "output": 0.60},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
     "text-embedding-3-small": {"input": 0.02, "output": 0.0},
 }
@@ -79,9 +80,13 @@ class AssistantResponse(BaseModel):
 
 
 async def expand_query(client, query: str) -> list[str]:
-    """Generate 3 alternative queries using gpt-5-nano."""
+    """Generate 3 alternative queries.
+
+    NOTE: gpt-5-nano returns empty strings for this prompt (as of 2026-03-06).
+    Using gpt-4o-mini until that's resolved.
+    """
     resp = await client.chat.completions.create(
-        model="gpt-5-nano",
+        model="gpt-4o-mini",
         messages=[
             {
                 "role": "system",
@@ -104,10 +109,10 @@ async def expand_query(client, query: str) -> list[str]:
     expansions = lines[:3]
     model_call = {
         "name": "query_expansion",
-        "model": "gpt-5-nano",
+        "model": "gpt-4o-mini",
         "input_tokens": resp.usage.prompt_tokens,
         "output_tokens": resp.usage.completion_tokens,
-        "cost_usd": estimate_cost("gpt-5-nano", resp.usage.prompt_tokens, resp.usage.completion_tokens),
+        "cost_usd": estimate_cost("gpt-4o-mini", resp.usage.prompt_tokens, resp.usage.completion_tokens),
     }
     return expansions, model_call
 
