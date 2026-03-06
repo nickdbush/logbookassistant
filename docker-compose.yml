@@ -2,7 +2,7 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.13.6
     volumes:
-      - ./data/qdrant_storage:/qdrant/storage:ro
+      - ${DATA_DIR:-./data}/qdrant_storage:/qdrant/storage:ro
     restart: unless-stopped
 
   api:
@@ -10,7 +10,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      - ./data:/app/data:ro
+      - ${DATA_DIR:-./data}:/app/data:ro
     env_file: .env
     environment:
       - QDRANT_URL=http://qdrant:6333
