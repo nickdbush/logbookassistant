@@ -9,8 +9,10 @@ import logging
 import os
 import pickle
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import asyncpg
 import duckdb
@@ -36,6 +38,37 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 # --- Pydantic models ---
 
+# Outbound: server → client
+class SelectOption(BaseModel):
+    label: str
+    value: str
+
+
+class Question(BaseModel):
+    id: str
+    type: Literal["single_select", "multi_select", "number"]
+    text: str
+    options: list[SelectOption] | None = None
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    unit: str | None = None
+
+
+# Inbound: client → server
+class QuestionAnswer(BaseModel):
+    question_id: str
+    selected: list[str] | None = None
+    number: float | None = None
+
+
+class ConversationTurn(BaseModel):
+    role: Literal["assistant", "user"]
+    text: str | None = None
+    questions: list[Question] | None = None   # assistant turns only
+    answers: list[QuestionAnswer] | None = None  # user turns only
+
+
 class QueryRequest(BaseModel):
     query: str
     series: str | None = None
@@ -44,6 +77,10 @@ class QueryRequest(BaseModel):
     vin: str | None = None  # backward compat alias for identifier
     vin_only: bool = False
     model: str = "gpt-5-mini"
+    conversation: list[ConversationTurn] | None = None
+    sources: list[dict] | None = None
+    conversation_id: str | None = None
+    expanded_queries: list[str] | None = None
 
 
 class Span(BaseModel):
@@ -61,11 +98,14 @@ class ModelCall(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    questions: list[Question] | None = None
     sources: list[dict]
     vin_info: dict | None = None
     timing: dict
     spans: list[Span]
     model_calls: list[ModelCall]
+    conversation_id: str
+    expanded_queries: list[str]
 
 
 # --- Lifespan ---
@@ -196,91 +236,148 @@ async def query(req: QueryRequest):
     spans = []
     model_calls = []
 
-    # Identifier resolution (VIN or VRM) + query expansion in parallel
-    vin_info = None
-    tt_id = None
-    machine_id = req.identifier or req.vin
+    is_followup = req.conversation is not None and req.sources is not None
+    conversation_id = req.conversation_id or str(uuid.uuid4())
+    logger.info("conversation_id=%s followup=%s", conversation_id, is_followup)
 
-    t_pre = time.time()
-    if machine_id:
-        vin_coro = asyncio.to_thread(resolve_identifier, machine_id, db=app.state.duckdb)
-        expansion_coro = expand_query(app.state.openai, req.query)
-        results = await asyncio.gather(vin_coro, expansion_coro, return_exceptions=True)
+    if is_followup:
+        # --- Follow-up turn: skip retrieval, reconstruct context ---
+        expanded_queries = req.expanded_queries or []
 
-        # VIN result
-        vin_result = results[0]
-        if isinstance(vin_result, Exception):
-            logger.warning("Identifier resolution failed: %s", vin_result)
-        else:
-            vin_info = vin_result
-            tt_id = vin_info["tt_id"]
-        spans.append(Span(name="vin_resolution", duration_ms=int((time.time() - t_pre) * 1000)))
+        # Reconstruct ranked_chunks from cached sources
+        ranked = []
+        for i, src in enumerate(req.sources):
+            iu_id = src.get("iu_id", "")
+            chunk_id = iu_id + "_c000"
+            score = 1.0 / (i + 1)  # synthetic RRF-like score by position
+            ranked.append((chunk_id, score))
 
-        # Expansion result
-        exp_result = results[1]
-        if isinstance(exp_result, Exception):
-            logger.warning("Query expansion failed: %s", exp_result)
-            expansions, expansion_mc = [], None
-        else:
-            expansions, expansion_mc = exp_result
-        spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
+        t = time.time()
+        context, sources = await asyncio.to_thread(
+            assemble_context,
+            ranked,
+            app.state.chunk_ids,
+            app.state.texts,
+            app.state.content_types,
+            app.state.token_counts,
+            app.state.id_to_idx,
+            app.state.num_chunks_arr,
+            app.state.chunk_indices_arr,
+            series_filter=req.series,
+            iu_series_map=app.state.iu_series_map,
+            iu_metadata=app.state.iu_metadata,
+        )
+        spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
+
+        retrieval_ms = 0
+        vin_info = None
+
+        # Generation with conversation history
+        t_gen = time.time()
+        conversation_dicts = [turn.model_dump() for turn in req.conversation]
+        answer, questions, gen_mc = await generate_answer(
+            app.state.openai, req.query, context, sources,
+            model=req.model, conversation=conversation_dicts,
+        )
+        generation_ms = int((time.time() - t_gen) * 1000)
+        spans.append(Span(name="generation", duration_ms=generation_ms))
+        model_calls.append(ModelCall(**gen_mc))
+
     else:
-        expansions, expansion_mc = await expand_query(app.state.openai, req.query)
-        spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
+        # --- Turn 1: full retrieval pipeline ---
+        vin_info = None
+        tt_id = None
+        machine_id = req.identifier or req.vin
 
-    if expansion_mc:
-        model_calls.append(ModelCall(**expansion_mc))
-    all_queries = [req.query] + expansions
+        t_pre = time.time()
+        if machine_id:
+            vin_coro = asyncio.to_thread(resolve_identifier, machine_id, db=app.state.duckdb)
+            expansion_coro = expand_query(app.state.openai, req.query)
+            results = await asyncio.gather(vin_coro, expansion_coro, return_exceptions=True)
 
-    # Hybrid retrieval
-    t_retrieval = time.time()
-    ranked, retrieval_spans, retrieval_mcs = await hybrid_search(
-        all_queries,
-        app.state.openai,
-        app.state.qdrant,
-        app.state.bm25,
-        app.state.chunk_ids,
-        series_filter=req.series,
-        series_only=req.series_only,
-        tt_id=tt_id,
-        tt_only=req.vin_only,
-        db=app.state.duckdb,
-        iu_series_map=app.state.iu_series_map,
-        iu_to_chunk_indices=app.state.iu_to_chunk_indices,
-    )
-    retrieval_ms = int((time.time() - t_retrieval) * 1000)
-    spans.extend(Span(**s) for s in retrieval_spans)
-    model_calls.extend(ModelCall(**mc) for mc in retrieval_mcs)
+            # VIN result
+            vin_result = results[0]
+            if isinstance(vin_result, Exception):
+                logger.warning("Identifier resolution failed: %s", vin_result)
+            else:
+                vin_info = vin_result
+                tt_id = vin_info["tt_id"]
+            spans.append(Span(name="vin_resolution", duration_ms=int((time.time() - t_pre) * 1000)))
 
-    # Context assembly
-    t = time.time()
-    context, sources = await asyncio.to_thread(
-        assemble_context,
-        ranked,
-        app.state.chunk_ids,
-        app.state.texts,
-        app.state.content_types,
-        app.state.token_counts,
-        app.state.id_to_idx,
-        app.state.num_chunks_arr,
-        app.state.chunk_indices_arr,
-        series_filter=req.series,
-        iu_series_map=app.state.iu_series_map,
-        iu_metadata=app.state.iu_metadata,
-    )
-    spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
+            # Expansion result
+            exp_result = results[1]
+            if isinstance(exp_result, Exception):
+                logger.warning("Query expansion failed: %s", exp_result)
+                expansions, expansion_mc = [], None
+            else:
+                expansions, expansion_mc = exp_result
+            spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
+        else:
+            expansions, expansion_mc = await expand_query(app.state.openai, req.query)
+            spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
 
-    # Generation
-    t_gen = time.time()
-    answer, gen_mc = await generate_answer(app.state.openai, req.query, context, sources, model=req.model)
-    generation_ms = int((time.time() - t_gen) * 1000)
-    spans.append(Span(name="generation", duration_ms=int((time.time() - t_gen) * 1000)))
-    model_calls.append(ModelCall(**gen_mc))
+        if expansion_mc:
+            model_calls.append(ModelCall(**expansion_mc))
+        all_queries = [req.query] + expansions
+        expanded_queries = expansions
+
+        # Hybrid retrieval
+        t_retrieval = time.time()
+        ranked, retrieval_spans, retrieval_mcs = await hybrid_search(
+            all_queries,
+            app.state.openai,
+            app.state.qdrant,
+            app.state.bm25,
+            app.state.chunk_ids,
+            series_filter=req.series,
+            series_only=req.series_only,
+            tt_id=tt_id,
+            tt_only=req.vin_only,
+            db=app.state.duckdb,
+            iu_series_map=app.state.iu_series_map,
+            iu_to_chunk_indices=app.state.iu_to_chunk_indices,
+        )
+        retrieval_ms = int((time.time() - t_retrieval) * 1000)
+        spans.extend(Span(**s) for s in retrieval_spans)
+        model_calls.extend(ModelCall(**mc) for mc in retrieval_mcs)
+
+        # Context assembly
+        t = time.time()
+        context, sources = await asyncio.to_thread(
+            assemble_context,
+            ranked,
+            app.state.chunk_ids,
+            app.state.texts,
+            app.state.content_types,
+            app.state.token_counts,
+            app.state.id_to_idx,
+            app.state.num_chunks_arr,
+            app.state.chunk_indices_arr,
+            series_filter=req.series,
+            iu_series_map=app.state.iu_series_map,
+            iu_metadata=app.state.iu_metadata,
+        )
+        spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
+
+        # Generation
+        t_gen = time.time()
+        answer, questions, gen_mc = await generate_answer(
+            app.state.openai, req.query, context, sources, model=req.model,
+        )
+        generation_ms = int((time.time() - t_gen) * 1000)
+        spans.append(Span(name="generation", duration_ms=generation_ms))
+        model_calls.append(ModelCall(**gen_mc))
 
     total_ms = int((time.time() - t0) * 1000)
 
+    # Parse questions into Pydantic models if present
+    parsed_questions = None
+    if questions:
+        parsed_questions = [Question(**q) for q in questions]
+
     return QueryResponse(
         answer=answer,
+        questions=parsed_questions,
         sources=sources,
         vin_info=vin_info,
         timing={
@@ -290,4 +387,6 @@ async def query(req: QueryRequest):
         },
         spans=spans,
         model_calls=model_calls,
+        conversation_id=conversation_id,
+        expanded_queries=expanded_queries,
     )

@@ -30,7 +30,79 @@ Guidelines:
 - If the documentation doesn't contain enough info, say so clearly
 - Use clear technical language appropriate for dealer technicians
 - When multiple procedures apply, list them in logical diagnostic order
+
+## Clarifying Questions
+When the technician's question is ambiguous or you need more information for an \
+accurate diagnosis, ask clarifying questions. Always provide what help you can in \
+your answer first, then ask questions to refine.
+
+Question types:
+- single_select: pick one option (use for yes/no with "Yes"/"No" options)
+- multi_select: select all that apply (symptoms, conditions)
+- number: request a measurement (set unit, min, max, step)
+
+Rules:
+- Ask 1-3 questions max per response
+- Make questions specific and actionable
+- Always provide options that cover the likely cases
+- The technician can always type a freeform response instead
+- Set questions to null when you have enough information
 """
+
+RESPONSE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "assistant_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "answer": {"type": "string"},
+                "questions": {
+                    "anyOf": [
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "type": {"type": "string", "enum": ["single_select", "multi_select", "number"]},
+                                    "text": {"type": "string"},
+                                    "options": {
+                                        "anyOf": [
+                                            {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "label": {"type": "string"},
+                                                        "value": {"type": "string"},
+                                                    },
+                                                    "required": ["label", "value"],
+                                                    "additionalProperties": False,
+                                                },
+                                            },
+                                            {"type": "null"},
+                                        ],
+                                    },
+                                    "min": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+                                    "max": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+                                    "step": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+                                    "unit": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                                },
+                                "required": ["id", "type", "text", "options", "min", "max", "step", "unit"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        {"type": "null"},
+                    ],
+                },
+            },
+            "required": ["answer", "questions"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 async def expand_query(client, query: str) -> list[str]:
@@ -65,8 +137,39 @@ async def expand_query(client, query: str) -> list[str]:
     return expansions, model_call
 
 
-async def generate_answer(client, query: str, context: str, sources: list[dict], model: str = DEFAULT_GEN_MODEL) -> str:
+def _format_user_turn(turn: dict, question_map: dict[str, str] | None = None) -> str:
+    """Format a user conversation turn into readable text for the LLM.
+
+    question_map: mapping of question ID → question text from the preceding
+    assistant turn, used to label answers with the question rather than an
+    opaque ID.
+    """
+    qmap = question_map or {}
+    parts = []
+    if turn.get("answers"):
+        for ans in turn["answers"]:
+            qid = ans.get("question_id", "?")
+            label = qmap.get(qid, qid)
+            if ans.get("selected"):
+                parts.append(f"{label}: {', '.join(ans['selected'])}")
+            elif ans.get("number") is not None:
+                parts.append(f"{label}: {ans['number']}")
+    if turn.get("text"):
+        parts.append(turn["text"])
+    return "\n".join(parts) if parts else "(no response)"
+
+
+async def generate_answer(
+    client,
+    query: str,
+    context: str,
+    sources: list[dict],
+    model: str = DEFAULT_GEN_MODEL,
+    conversation: list[dict] | None = None,
+) -> tuple[str, list[dict] | None, dict]:
     """Generate answer from context using the specified model."""
+    import json as _json
+
     user_msg = f"""Question: {query}
 
 Reference Documentation:
@@ -74,15 +177,47 @@ Reference Documentation:
 
 Please answer the question using the documentation above. Cite sources using [Source: IU_ID] format."""
 
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+
+    # Append prior conversation turns
+    if conversation:
+        last_questions: dict[str, str] = {}
+        for turn in conversation:
+            if turn.get("role") == "assistant":
+                # Build question ID → text map for the next user turn
+                last_questions = {}
+                if turn.get("questions"):
+                    for q in turn["questions"]:
+                        last_questions[q["id"]] = q["text"]
+                # Reconstruct the JSON the model originally produced
+                messages.append({
+                    "role": "assistant",
+                    "content": _json.dumps({
+                        "answer": turn.get("text", ""),
+                        "questions": turn.get("questions"),
+                    }),
+                })
+            elif turn.get("role") == "user":
+                messages.append({
+                    "role": "user",
+                    "content": _format_user_turn(turn, last_questions),
+                })
+                last_questions = {}
+
     resp = await client.chat.completions.create(
         model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
+        messages=messages,
         max_completion_tokens=2000,
+        response_format=RESPONSE_SCHEMA,
     )
-    answer = resp.choices[0].message.content
+    raw = resp.choices[0].message.content
+    parsed = _json.loads(raw)
+    answer = parsed["answer"]
+    questions = parsed.get("questions")
+
     model_call = {
         "name": "generation",
         "model": model,
@@ -90,4 +225,4 @@ Please answer the question using the documentation above. Cite sources using [So
         "output_tokens": resp.usage.completion_tokens,
         "cost_usd": estimate_cost(model, resp.usage.prompt_tokens, resp.usage.completion_tokens),
     }
-    return answer, model_call
+    return answer, questions, model_call
