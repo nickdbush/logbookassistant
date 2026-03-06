@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
@@ -77,7 +78,7 @@ class QueryRequest(BaseModel):
     identifier: str | None = None
     vin: str | None = None  # backward compat alias for identifier
     vin_only: bool = False
-    model: str = "gpt-5-mini"
+    model: str = "claude-sonnet-4-6"
     conversation: list[ConversationTurn] | None = None
     sources: list[dict] | None = None
     conversation_id: str | None = None
@@ -116,6 +117,7 @@ async def lifespan(app: FastAPI):
     logger.info("Loading resources...")
 
     app.state.openai = AsyncOpenAI()
+    app.state.anthropic = AsyncAnthropic()
     app.state.qdrant = QdrantClient(url=QDRANT_URL)
 
     # Shared read-only DuckDB connection
@@ -272,7 +274,7 @@ async def query(req: QueryRequest):
         t_gen = time.time()
         conversation_dicts = [turn.model_dump() for turn in req.conversation]
         answer, questions, gen_mc = await generate_answer(
-            app.state.openai, req.query, context, sources,
+            app.state.anthropic, req.query, context, sources,
             model=req.model, conversation=conversation_dicts,
         )
         generation_ms = int((time.time() - t_gen) * 1000)
@@ -358,7 +360,7 @@ async def query(req: QueryRequest):
         # Generation
         t_gen = time.time()
         answer, questions, gen_mc = await generate_answer(
-            app.state.openai, req.query, context, sources, model=req.model,
+            app.state.anthropic, req.query, context, sources, model=req.model,
         )
         generation_ms = int((time.time() - t_gen) * 1000)
         spans.append(Span(name="generation", duration_ms=generation_ms))

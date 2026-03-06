@@ -1,13 +1,17 @@
-"""Query expansion and answer generation (async OpenAI)."""
+"""Query expansion (OpenAI) and answer generation (Anthropic)."""
 
 from __future__ import annotations
 
-DEFAULT_GEN_MODEL = "gpt-5-mini"
+import json as _json
+from typing import Literal
+
+from pydantic import BaseModel
+
+DEFAULT_GEN_MODEL = "claude-sonnet-4-6"
 
 MODEL_PRICING = {
     "gpt-5-nano":  {"input": 0.05,  "output": 0.40},
-    "gpt-5-mini":  {"input": 0.25,  "output": 2.00},
-    "gpt-4o":      {"input": 2.50,  "output": 10.00},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
     "text-embedding-3-small": {"input": 0.02, "output": 0.0},
 }
 
@@ -49,60 +53,25 @@ Rules:
 - Set questions to null when you have enough information
 """
 
-RESPONSE_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "assistant_response",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "answer": {"type": "string"},
-                "questions": {
-                    "anyOf": [
-                        {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string"},
-                                    "type": {"type": "string", "enum": ["single_select", "multi_select", "number"]},
-                                    "text": {"type": "string"},
-                                    "options": {
-                                        "anyOf": [
-                                            {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "properties": {
-                                                        "label": {"type": "string"},
-                                                        "value": {"type": "string"},
-                                                    },
-                                                    "required": ["label", "value"],
-                                                    "additionalProperties": False,
-                                                },
-                                            },
-                                            {"type": "null"},
-                                        ],
-                                    },
-                                    "min": {"anyOf": [{"type": "number"}, {"type": "null"}]},
-                                    "max": {"anyOf": [{"type": "number"}, {"type": "null"}]},
-                                    "step": {"anyOf": [{"type": "number"}, {"type": "null"}]},
-                                    "unit": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                                },
-                                "required": ["id", "type", "text", "options", "min", "max", "step", "unit"],
-                                "additionalProperties": False,
-                            },
-                        },
-                        {"type": "null"},
-                    ],
-                },
-            },
-            "required": ["answer", "questions"],
-            "additionalProperties": False,
-        },
-    },
-}
+class SelectOption(BaseModel):
+    label: str
+    value: str
+
+
+class ResponseQuestion(BaseModel):
+    id: str
+    type: Literal["single_select", "multi_select", "number"]
+    text: str
+    options: list[SelectOption] | None = None
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    unit: str | None = None
+
+
+class AssistantResponse(BaseModel):
+    answer: str
+    questions: list[ResponseQuestion] | None = None
 
 
 async def expand_query(client, query: str) -> list[str]:
@@ -167,9 +136,7 @@ async def generate_answer(
     model: str = DEFAULT_GEN_MODEL,
     conversation: list[dict] | None = None,
 ) -> tuple[str, list[dict] | None, dict]:
-    """Generate answer from context using the specified model."""
-    import json as _json
-
+    """Generate answer from context using Anthropic structured output."""
     user_msg = f"""Question: {query}
 
 Reference Documentation:
@@ -177,22 +144,16 @@ Reference Documentation:
 
 Please answer the question using the documentation above. Cite sources using [Source: IU_ID] format."""
 
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+    messages = [{"role": "user", "content": user_msg}]
 
-    # Append prior conversation turns
     if conversation:
         last_questions: dict[str, str] = {}
         for turn in conversation:
             if turn.get("role") == "assistant":
-                # Build question ID → text map for the next user turn
                 last_questions = {}
                 if turn.get("questions"):
                     for q in turn["questions"]:
                         last_questions[q["id"]] = q["text"]
-                # Reconstruct the JSON the model originally produced
                 messages.append({
                     "role": "assistant",
                     "content": _json.dumps({
@@ -207,22 +168,22 @@ Please answer the question using the documentation above. Cite sources using [So
                 })
                 last_questions = {}
 
-    resp = await client.chat.completions.create(
+    resp = await client.messages.parse(
         model=model,
+        system=SYSTEM_PROMPT,
         messages=messages,
-        max_completion_tokens=2000,
-        response_format=RESPONSE_SCHEMA,
+        max_tokens=2000,
+        output_format=AssistantResponse,
     )
-    raw = resp.choices[0].message.content
-    parsed = _json.loads(raw)
-    answer = parsed["answer"]
-    questions = parsed.get("questions")
+    parsed = resp.parsed_output
+    answer = parsed.answer
+    questions = [q.model_dump() for q in parsed.questions] if parsed.questions else None
 
     model_call = {
         "name": "generation",
         "model": model,
-        "input_tokens": resp.usage.prompt_tokens,
-        "output_tokens": resp.usage.completion_tokens,
-        "cost_usd": estimate_cost(model, resp.usage.prompt_tokens, resp.usage.completion_tokens),
+        "input_tokens": resp.usage.input_tokens,
+        "output_tokens": resp.usage.output_tokens,
+        "cost_usd": estimate_cost(model, resp.usage.input_tokens, resp.usage.output_tokens),
     }
     return answer, questions, model_call
