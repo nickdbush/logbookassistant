@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import pickle
@@ -10,9 +11,11 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import asyncpg
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
@@ -26,7 +29,7 @@ logger = logging.getLogger("assistant")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/app/data"))
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
-API_KEY = os.environ.get("API_KEY", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
 
 # --- Pydantic models ---
@@ -56,6 +59,12 @@ async def lifespan(app: FastAPI):
     app.state.openai = AsyncOpenAI()
     app.state.qdrant = QdrantClient(url=QDRANT_URL)
 
+    # Postgres connection pool for token validation
+    if DATABASE_URL:
+        app.state.pg_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    else:
+        app.state.pg_pool = None
+
     # BM25 index
     bm25_path = DATA_DIR / "bm25_index.pkl"
     logger.info("  BM25 index: %s", bm25_path)
@@ -81,6 +90,8 @@ async def lifespan(app: FastAPI):
     logger.info("Resources loaded.")
     yield
 
+    if app.state.pg_pool:
+        await app.state.pg_pool.close()
     app.state.qdrant.close()
 
 
@@ -91,11 +102,24 @@ app = FastAPI(title="CNH Technician Assistant", lifespan=lifespan)
 
 # --- Auth ---
 
-async def verify_api_key(x_api_key: str = Header()):
-    if not API_KEY:
-        raise HTTPException(500, "API_KEY not configured")
-    if x_api_key != API_KEY:
-        raise HTTPException(401, "Invalid API key")
+bearer_scheme = HTTPBearer()
+
+
+async def verify_bearer_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+):
+    pool = request.app.state.pg_pool
+    if pool is None:
+        raise HTTPException(500, "DATABASE_URL not configured")
+    token_hash = hashlib.sha256(credentials.credentials.encode()).hexdigest()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            'SELECT 1 FROM "Token" WHERE "tokenHash" = $1 AND "isRevoked" = false',
+            token_hash,
+        )
+    if row is None:
+        raise HTTPException(401, "Invalid or revoked token")
 
 
 # --- Routes ---
@@ -105,7 +129,7 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/query", response_model=QueryResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/query", response_model=QueryResponse, dependencies=[Depends(verify_bearer_token)])
 async def query(req: QueryRequest):
     t0 = time.time()
 
