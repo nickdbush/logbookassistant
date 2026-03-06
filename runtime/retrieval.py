@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
-from pathlib import Path
 
-import duckdb
 import numpy as np
 
 from generation import estimate_cost
@@ -25,10 +22,6 @@ FINAL_TOP_K = 15
 TOKEN_BUDGET = 10_000
 
 
-def _data_dir() -> Path:
-    return Path(os.environ.get("DATA_DIR", "/app/data"))
-
-
 def parse_list_field(val):
     """Parse stringified list fields like '["a", "b"]' → list."""
     if val is None or val == "" or val == "[]":
@@ -37,11 +30,6 @@ def parse_list_field(val):
         return json.loads(val)
     except (json.JSONDecodeError, TypeError):
         return [val] if val else []
-
-
-async def embed_query(client, text: str):
-    resp = await client.embeddings.create(model=EMBED_MODEL, input=[text])
-    return resp.data[0].embedding, resp.usage.prompt_tokens
 
 
 async def hybrid_search(
@@ -54,6 +42,9 @@ async def hybrid_search(
     series_only=False,
     tt_id=None,
     tt_only=False,
+    db=None,
+    iu_series_map=None,
+    iu_to_chunk_indices=None,
 ):
     """Run vector + BM25 search for each query, merge with RRF."""
     widen = series_filter or tt_id
@@ -64,48 +55,107 @@ async def hybrid_search(
     spans = []
     model_calls = []
 
-    for i, query in enumerate(queries):
-        # Embed
-        t = time.time()
-        query_vec, embed_tokens = await embed_query(openai_client, query)
-        spans.append({"name": f"embed_query #{i}", "duration_ms": int((time.time() - t) * 1000)})
-        model_calls.append({
-            "name": f"embed_query #{i}",
-            "model": EMBED_MODEL,
-            "input_tokens": embed_tokens,
-            "output_tokens": 0,
-            "cost_usd": estimate_cost(EMBED_MODEL, embed_tokens, 0),
-        })
+    # Build BM25 hard mask for _only modes (zero out non-matching before top-k)
+    # Boosting happens only at the RRF level to avoid double-boosting
+    bm25_mask = None
+    applicable_miuids = None
+    n_chunks = len(chunk_ids)
 
-        # Qdrant search
-        t = time.time()
-        response = await asyncio.to_thread(
-            qdrant.query_points,
+    if tt_id and iu_to_chunk_indices:
+        cur = db.cursor() if db else None
+        if cur:
+            rows = cur.execute(
+                "SELECT iu_miuid FROM iu_tt_applicability WHERE tt_id = ?", [tt_id]
+            ).fetchall()
+            cur.close()
+            applicable_miuids = {r[0] for r in rows}
+            if applicable_miuids and tt_only:
+                tt_mask = np.zeros(n_chunks, dtype=bool)
+                for miuid in applicable_miuids:
+                    for idx in iu_to_chunk_indices.get(miuid, []):
+                        tt_mask[idx] = True
+                bm25_mask = tt_mask
+
+    if series_only and series_filter and iu_series_map and iu_to_chunk_indices:
+        series_mask = np.zeros(n_chunks, dtype=bool)
+        for iu_id, series_set in iu_series_map.items():
+            if series_filter in series_set:
+                base_miuid = iu_id
+                if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
+                    base_miuid = base_miuid.rsplit("_v", 1)[0]
+                for idx in iu_to_chunk_indices.get(base_miuid, []):
+                    series_mask[idx] = True
+                for idx in iu_to_chunk_indices.get(iu_id, []):
+                    series_mask[idx] = True
+        if bm25_mask is not None:
+            bm25_mask = bm25_mask & series_mask
+        else:
+            bm25_mask = series_mask
+
+    # Step 5: Batch all embeddings in a single API call
+    t = time.time()
+    embed_resp = await openai_client.embeddings.create(model=EMBED_MODEL, input=queries)
+    total_embed_tokens = embed_resp.usage.prompt_tokens
+    query_vecs = [item.embedding for item in embed_resp.data]
+    embed_ms = int((time.time() - t) * 1000)
+    spans.append({"name": "embed_batch", "duration_ms": embed_ms})
+    model_calls.append({
+        "name": "embed_batch",
+        "model": EMBED_MODEL,
+        "input_tokens": total_embed_tokens,
+        "output_tokens": 0,
+        "cost_usd": estimate_cost(EMBED_MODEL, total_embed_tokens, 0),
+    })
+
+    # Run all qdrant searches + all BM25 searches in parallel
+    def _qdrant_search(query_vec, k):
+        response = qdrant.query_points(
             collection_name=COLLECTION_NAME,
             query=query_vec,
-            limit=vec_k,
+            limit=k,
         )
-        spans.append({"name": f"qdrant_search #{i}", "duration_ms": int((time.time() - t) * 1000)})
-        for rank, hit in enumerate(response.points):
-            cid = hit.payload["chunk_id"]
+        return [(rank, hit.payload["chunk_id"]) for rank, hit in enumerate(response.points)]
+
+    def _bm25_search(query_text):
+        tokenized = query_text.lower().split()
+        scores = bm25.get_scores(tokenized)
+
+        # Apply hard mask for _only modes (Step 6)
+        if bm25_mask is not None:
+            scores[~bm25_mask] = 0
+
+        # Step 3: argpartition instead of full argsort
+        nonzero_count = np.count_nonzero(scores)
+        k = min(bm25_k, nonzero_count)
+        if k == 0:
+            return []
+        top_unsorted = np.argpartition(scores, -k)[-k:]
+        top_indices = top_unsorted[np.argsort(scores[top_unsorted])[::-1]]
+
+        results = []
+        for rank_i, idx in enumerate(top_indices):
+            if scores[idx] <= 0:
+                break
+            results.append((rank_i, chunk_ids[idx]))
+        return results
+
+    t = time.time()
+    # Build all coroutines for parallel execution
+    qdrant_coros = [asyncio.to_thread(_qdrant_search, qv, vec_k) for qv in query_vecs]
+    bm25_coros = [asyncio.to_thread(_bm25_search, q) for q in queries]
+    all_results = await asyncio.gather(*qdrant_coros, *bm25_coros)
+    search_ms = int((time.time() - t) * 1000)
+    spans.append({"name": "parallel_search", "duration_ms": search_ms})
+
+    n_queries = len(queries)
+    qdrant_results = all_results[:n_queries]
+    bm25_results_list = all_results[n_queries:]
+
+    for qdrant_hits in qdrant_results:
+        for rank, cid in qdrant_hits:
             all_ranks.setdefault(cid, []).append(rank)
-
-        # BM25 search (CPU-bound, run in thread)
-        def _bm25_search(q=query):
-            tokenized = q.lower().split()
-            scores = bm25.get_scores(tokenized)
-            top_indices = np.argsort(scores)[::-1][:bm25_k]
-            results = []
-            for rank_i, idx in enumerate(top_indices):
-                if scores[idx] <= 0:
-                    break
-                results.append((rank_i, chunk_ids[idx]))
-            return results
-
-        t = time.time()
-        bm25_results = await asyncio.to_thread(_bm25_search)
-        spans.append({"name": f"bm25_search #{i}", "duration_ms": int((time.time() - t) * 1000)})
-        for rank, cid in bm25_results:
+    for bm25_hits in bm25_results_list:
+        for rank, cid in bm25_hits:
             all_ranks.setdefault(cid, []).append(rank)
 
     # RRF scoring
@@ -115,74 +165,44 @@ async def hybrid_search(
         rrf_scores[cid] = sum(1.0 / (RRF_K + r) for r in ranks)
     spans.append({"name": "rrf_ranking", "duration_ms": int((time.time() - t) * 1000)})
 
-    # Series boost or filter
-    if series_filter:
+    # Series boost/filter on RRF results (using cached iu_series_map)
+    if series_filter and iu_series_map:
         t = time.time()
-        rrf_scores = apply_series_boost(rrf_scores, series_filter, series_only=series_only)
+        rrf_scores = _apply_series_boost_cached(rrf_scores, series_filter, iu_series_map, series_only=series_only)
         spans.append({"name": "series_boost", "duration_ms": int((time.time() - t) * 1000)})
 
-    # TT boost or filter
+    # TT boost/filter on RRF results (reuse applicable_miuids if already fetched)
     if tt_id:
         t = time.time()
-        rrf_scores = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only)
+        rrf_scores = apply_tt_filter(rrf_scores, tt_id, tt_only=tt_only, db=db, applicable_miuids=applicable_miuids)
         spans.append({"name": "tt_boost", "duration_ms": int((time.time() - t) * 1000)})
 
     ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
     return ranked, spans, model_calls
 
 
-def apply_series_boost(rrf_scores, series_filter, series_only=False):
-    """Boost chunks whose parent IU appears in the given series (3x), or filter to only those."""
-    db_path = _data_dir() / "metadata.duckdb"
-    db = duckdb.connect(str(db_path), read_only=True)
-
-    iu_ids = set()
-    chunk_to_iu = {}
-    for cid in rrf_scores:
-        iu_id = cid.rsplit("_c", 1)[0]
-        iu_ids.add(iu_id)
-        chunk_to_iu[cid] = iu_id
-
-    if not iu_ids:
-        db.close()
-        return rrf_scores
-
-    iu_list = list(iu_ids)
-    placeholders = ",".join(["?"] * len(iu_list))
-    rows = db.execute(
-        f"SELECT canonical_id, appearances FROM canonical_ius WHERE canonical_id IN ({placeholders})",
-        iu_list,
-    ).fetchall()
-    db.close()
-
-    iu_series = {}
-    for canonical_id, appearances in rows:
-        apps = parse_list_field(appearances)
-        series_set = {a.get("series", "") for a in apps if isinstance(a, dict)}
-        iu_series[canonical_id] = series_set
-
+def _apply_series_boost_cached(rrf_scores, series_filter, iu_series_map, series_only=False):
+    """Boost/filter RRF scores using pre-cached iu_series_map (no DuckDB)."""
     boosted = {}
     for cid, score in rrf_scores.items():
-        iu_id = chunk_to_iu[cid]
-        in_series = series_filter in iu_series.get(iu_id, set())
+        iu_id = cid.rsplit("_c", 1)[0]
+        in_series = series_filter in iu_series_map.get(iu_id, frozenset())
         if series_only and not in_series:
             continue
         boosted[cid] = score * 3.0 if in_series else score
-
     return boosted
 
 
-def apply_tt_filter(rrf_scores, tt_id, tt_only=False):
+def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db=None, applicable_miuids=None):
     """Boost/filter chunks whose parent IU applies to the given technical type."""
-    db_path = _data_dir() / "metadata.duckdb"
-    db = duckdb.connect(str(db_path), read_only=True)
+    if applicable_miuids is None and db is not None:
+        cur = db.cursor()
+        rows = cur.execute(
+            "SELECT iu_miuid FROM iu_tt_applicability WHERE tt_id = ?", [tt_id]
+        ).fetchall()
+        cur.close()
+        applicable_miuids = {r[0] for r in rows}
 
-    rows = db.execute(
-        "SELECT iu_miuid FROM iu_tt_applicability WHERE tt_id = ?", [tt_id]
-    ).fetchall()
-    db.close()
-
-    applicable_miuids = {r[0] for r in rows}
     if not applicable_miuids:
         return rrf_scores
 
@@ -201,11 +221,12 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False):
     return boosted
 
 
-def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx, num_chunks_arr, chunk_indices_arr, series_filter=None):
+def assemble_context(
+    ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx,
+    num_chunks_arr, chunk_indices_arr, series_filter=None,
+    iu_series_map=None, iu_metadata=None,
+):
     """Assemble context from top chunks, respecting token budget."""
-    db_path = _data_dir() / "metadata.duckdb"
-    db = duckdb.connect(str(db_path), read_only=True)
-
     context_blocks = []
     sources = []
     total_tokens = 0
@@ -222,21 +243,17 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
             break
 
         iu_id = cid.rsplit("_c", 1)[0]
-        iu_row = db.execute(
-            "SELECT content_type, fault_codes, iu_cross_references, appearances, title FROM canonical_ius WHERE canonical_id = ?",
-            [iu_id],
-        ).fetchone()
 
+        # Use cached metadata instead of per-chunk DuckDB query
         in_target_series = False
         content_type = content_types[idx] or "unknown"
         title = ""
+        iu_row = iu_metadata.get(iu_id) if iu_metadata else None
         if iu_row:
             content_type = iu_row[0] or content_type
-            if series_filter:
-                apps = parse_list_field(iu_row[3])
-                iu_series = {a["series"] for a in apps if isinstance(a, dict) and "series" in a}
-                in_target_series = series_filter in iu_series
             title = iu_row[4] or ""
+            if series_filter and iu_series_map:
+                in_target_series = series_filter in iu_series_map.get(iu_id, frozenset())
 
         # Pull adjacent chunks if multi-chunk IU
         full_text = chunk_text
@@ -270,5 +287,4 @@ def assemble_context(ranked_chunks, chunk_ids, texts, content_types, token_count
             "rrf_score": rrf_score,
         })
 
-    db.close()
     return "\n\n---\n\n".join(context_blocks), sources

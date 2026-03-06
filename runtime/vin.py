@@ -15,7 +15,7 @@ def _db_path() -> Path:
     return Path(os.environ.get("DATA_DIR", "/app/data")) / "metadata.duckdb"
 
 
-def resolve_identifier(identifier: str, db_path: Path | None = None) -> dict:
+def resolve_identifier(identifier: str, db_path: Path | None = None, db=None) -> dict:
     """Resolve a VIN or VRM to a technical type via the Logbook API.
 
     Returns dict with keys: tt_id, tt_code, brand_name, series_name,
@@ -45,7 +45,7 @@ def resolve_identifier(identifier: str, db_path: Path | None = None) -> dict:
         raise ValueError(f"No profile resolved for identifier: {identifier}")
 
     tt_id = int(specs["technicalTypeId"])
-    db_info = _lookup_tt_info(tt_id, db_path)
+    db_info = _lookup_tt_info(tt_id, db_path, db=db)
 
     return {
         "tt_id": tt_id,
@@ -63,16 +63,25 @@ def resolve_identifier(identifier: str, db_path: Path | None = None) -> dict:
     }
 
 
-def _lookup_tt_info(tt_id: int, db_path: Path) -> dict | None:
+def _lookup_tt_info(tt_id: int, db_path: Path, db=None) -> dict | None:
     """Look up technical type info from DuckDB."""
-    db = duckdb.connect(str(db_path), read_only=True)
-    try:
-        row = db.execute(
-            "SELECT tt_name, series_icecode FROM technical_types WHERE tt_id = ?",
-            [tt_id],
-        ).fetchone()
-        if row:
-            return {"tt_name": row[0], "series_icecode": row[1]}
-    finally:
-        db.close()
-    return None
+    if db is None:
+        db = duckdb.connect(str(db_path), read_only=True)
+        try:
+            row = db.execute(
+                "SELECT tt_name, series_icecode FROM technical_types WHERE tt_id = ?",
+                [tt_id],
+            ).fetchone()
+            return {"tt_name": row[0], "series_icecode": row[1]} if row else None
+        finally:
+            db.close()
+    else:
+        cur = db.cursor()
+        try:
+            row = cur.execute(
+                "SELECT tt_name, series_icecode FROM technical_types WHERE tt_id = ?",
+                [tt_id],
+            ).fetchone()
+            return {"tt_name": row[0], "series_icecode": row[1]} if row else None
+        finally:
+            cur.close()

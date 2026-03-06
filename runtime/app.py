@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import pickle
@@ -12,6 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncpg
+import duckdb
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -75,6 +77,11 @@ async def lifespan(app: FastAPI):
     app.state.openai = AsyncOpenAI()
     app.state.qdrant = QdrantClient(url=QDRANT_URL)
 
+    # Shared read-only DuckDB connection
+    db_path = DATA_DIR / "metadata.duckdb"
+    app.state.duckdb = duckdb.connect(str(db_path), read_only=True)
+    logger.info("  DuckDB: %s", db_path)
+
     # Postgres connection pool for token validation
     if DATABASE_URL:
         app.state.pg_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
@@ -103,9 +110,47 @@ async def lifespan(app: FastAPI):
     app.state.chunk_indices_arr = chunks_table.column("chunk_index").to_pylist()
     app.state.id_to_idx = {cid: i for i, cid in enumerate(app.state.chunk_ids)}
 
+    # Startup caches from DuckDB
+    t_cache = time.time()
+    db = app.state.duckdb
+
+    # Single query builds both iu_series_map and iu_metadata
+    cur = db.cursor()
+    rows = cur.execute(
+        "SELECT canonical_id, content_type, fault_codes, iu_cross_references, appearances, title FROM canonical_ius"
+    ).fetchall()
+    cur.close()
+    iu_series_map = {}
+    iu_metadata = {}
+    for row in rows:
+        canonical_id = row[0]
+        appearances = row[4]
+        apps = json.loads(appearances) if appearances and appearances != "[]" else []
+        series_set = frozenset(a.get("series", "") for a in apps if isinstance(a, dict))
+        iu_series_map[canonical_id] = series_set
+        iu_metadata[canonical_id] = (row[1], row[2], row[3], row[4], row[5])
+    logger.info("  iu_series_map + iu_metadata: %d entries", len(iu_metadata))
+
+    app.state.iu_series_map = iu_series_map
+    app.state.iu_metadata = iu_metadata
+
+    # iu_to_chunk_indices: base miuid → list of chunk array indices
+    iu_to_chunk_indices: dict[str, list[int]] = {}
+    for i, cid in enumerate(app.state.chunk_ids):
+        iu_id = cid.rsplit("_c", 1)[0]
+        # Strip version suffix to get base miuid
+        base_miuid = iu_id
+        if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
+            base_miuid = base_miuid.rsplit("_v", 1)[0]
+        iu_to_chunk_indices.setdefault(base_miuid, []).append(i)
+    app.state.iu_to_chunk_indices = iu_to_chunk_indices
+    logger.info("  iu_to_chunk_indices: %d IUs", len(iu_to_chunk_indices))
+
+    logger.info("  Caches built in %.1fs", time.time() - t_cache)
     logger.info("Resources loaded.")
     yield
 
+    app.state.duckdb.close()
     if app.state.pg_pool:
         await app.state.pg_pool.close()
     app.state.qdrant.close()
@@ -151,24 +196,40 @@ async def query(req: QueryRequest):
     spans = []
     model_calls = []
 
-    # Identifier resolution (VIN or VRM)
+    # Identifier resolution (VIN or VRM) + query expansion in parallel
     vin_info = None
     tt_id = None
     machine_id = req.identifier or req.vin
-    if machine_id:
-        t = time.time()
-        try:
-            vin_info = await asyncio.to_thread(resolve_identifier, machine_id)
-            tt_id = vin_info["tt_id"]
-        except (ValueError, Exception) as e:
-            logger.warning("Identifier resolution failed: %s", e)
-        spans.append(Span(name="vin_resolution", duration_ms=int((time.time() - t) * 1000)))
 
-    # Query expansion
-    t = time.time()
-    expansions, expansion_mc = await expand_query(app.state.openai, req.query)
-    spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t) * 1000)))
-    model_calls.append(ModelCall(**expansion_mc))
+    t_pre = time.time()
+    if machine_id:
+        vin_coro = asyncio.to_thread(resolve_identifier, machine_id, db=app.state.duckdb)
+        expansion_coro = expand_query(app.state.openai, req.query)
+        results = await asyncio.gather(vin_coro, expansion_coro, return_exceptions=True)
+
+        # VIN result
+        vin_result = results[0]
+        if isinstance(vin_result, Exception):
+            logger.warning("Identifier resolution failed: %s", vin_result)
+        else:
+            vin_info = vin_result
+            tt_id = vin_info["tt_id"]
+        spans.append(Span(name="vin_resolution", duration_ms=int((time.time() - t_pre) * 1000)))
+
+        # Expansion result
+        exp_result = results[1]
+        if isinstance(exp_result, Exception):
+            logger.warning("Query expansion failed: %s", exp_result)
+            expansions, expansion_mc = [], None
+        else:
+            expansions, expansion_mc = exp_result
+        spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
+    else:
+        expansions, expansion_mc = await expand_query(app.state.openai, req.query)
+        spans.append(Span(name="query_expansion", duration_ms=int((time.time() - t_pre) * 1000)))
+
+    if expansion_mc:
+        model_calls.append(ModelCall(**expansion_mc))
     all_queries = [req.query] + expansions
 
     # Hybrid retrieval
@@ -183,6 +244,9 @@ async def query(req: QueryRequest):
         series_only=req.series_only,
         tt_id=tt_id,
         tt_only=req.vin_only,
+        db=app.state.duckdb,
+        iu_series_map=app.state.iu_series_map,
+        iu_to_chunk_indices=app.state.iu_to_chunk_indices,
     )
     retrieval_ms = int((time.time() - t_retrieval) * 1000)
     spans.extend(Span(**s) for s in retrieval_spans)
@@ -201,6 +265,8 @@ async def query(req: QueryRequest):
         app.state.num_chunks_arr,
         app.state.chunk_indices_arr,
         series_filter=req.series,
+        iu_series_map=app.state.iu_series_map,
+        iu_metadata=app.state.iu_metadata,
     )
     spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 
