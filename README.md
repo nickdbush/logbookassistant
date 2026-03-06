@@ -112,6 +112,19 @@ docker run -d -p 6333:6333 -p 6334:6334 \
 .venv/bin/python scripts/assistant.py "hydraulic fault" --vin HACT7210VPD100757
 ```
 
+### Evaluate retrieval
+
+```bash
+# Rate retrieved chunks as HIGH/MEDIUM/LOW relevance using LLM-as-judge
+.venv/bin/python scripts/eval_retrieval.py "How to replace DPF filter on T7.270?"
+.venv/bin/python scripts/eval_retrieval.py "fault code 47623" --series A.A.01.034
+
+# Batch mode: one query per line
+.venv/bin/python scripts/eval_retrieval.py queries.txt
+```
+
+Results are appended to `data/eval/retrieval_evals.jsonl` for tracking precision over time.
+
 ## Project structure
 
 ```
@@ -133,6 +146,7 @@ scripts/
   build_vector_store.py # Stage 8: Qdrant + BM25
   build_metadata_db.py  # Stage 8: DuckDB metadata
   assistant.py          # Stage 9: RAG assistant (entrypoint)
+  eval_retrieval.py     # LLM-as-judge retrieval quality evaluation
   test_retrieval.py     # Sanity check: run test queries against indices
 config/
   tag_map.yaml          # Arbortext XML tag → HTML mapping (236 tags)
