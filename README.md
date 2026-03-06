@@ -157,3 +157,83 @@ data/                   # Generated data (gitignored, ~25 GB total)
 - **Query expansion**: gpt-4o-mini generates 3 alternative queries for broader recall
 - **VIN-based filtering**: resolve VIN → technical type via S3 shard or CNH Store
   API, then boost/filter IUs by TT applicability from `WebDocIu` tables
+
+## Deployment
+
+The RAG assistant runs on a dedicated Hetzner Cloud server (CAX41 — 16 vCPU ARM,
+32 GB RAM, 320 GB NVMe, Ubuntu 24.04). The main Logbook app's Lambda API
+(`api.joinlogbook.com`) proxies assistant requests to this server.
+
+### Why not AWS?
+
+The assistant is a stateful, memory-heavy process (~15-20 GB resident) with ~90s
+cold start. Lambda can't run it (10 GB max, 15 min timeout, cold starts on every
+invocation). An equivalent EC2/ECS instance costs 4-5x more than Hetzner for this
+workload, and the service has no need for VPC access or AWS-specific integrations —
+it reads local indices and calls the OpenAI API.
+
+### Server setup
+
+The server (`logbookdata` in SSH config → `assistant@46.225.89.63`) was configured:
+
+- Root login and password auth disabled in sshd
+- Docker installed, `assistant` added to `docker` group
+- App directory at `/opt/logbook-rag/`
+- UFW firewall: SSH (22), HTTP (80), HTTPS (443) only
+
+### Required data files
+
+Only a subset of the pipeline output is needed at runtime (~14 GB):
+
+| File | Size | Purpose |
+|------|------|---------|
+| `data/bm25_index.pkl` | 1.8 GB | BM25 keyword retrieval |
+| `data/metadata.duckdb` | 11 GB | IU metadata, series boost, TT applicability |
+| `data/corpus/chunks.parquet` | 683 MB | Chunk text + token counts |
+| `data/qdrant_storage/` | ~500 MB | Qdrant vector index |
+
+Sync command:
+
+```bash
+rsync -avz --progress \
+  --include='bm25_index.pkl' \
+  --include='metadata.duckdb' \
+  --include='corpus/' \
+  --include='corpus/chunks.parquet' \
+  --include='qdrant_storage/***' \
+  --exclude='corpus/*' \
+  --exclude='*' \
+  data/ logbookdata:/opt/logbook-rag/data/
+```
+
+### Services (Docker Compose)
+
+Three containers in `/opt/logbook-rag/docker-compose.yml`:
+
+- **qdrant** — vector search, internal only (no exposed ports)
+- **api** — FastAPI wrapper around `assistant.py` logic, port 8080 internal
+- **caddy** — reverse proxy with automatic Let's Encrypt TLS on ports 80/443
+
+The API authenticates requests via a shared secret (`X-Api-Key` header) known
+to both the Lambda backend and this server.
+
+### Updating the corpus
+
+When the pipeline is re-run (new series data, re-embedding, etc.):
+
+1. Rebuild locally: run pipeline stages 1-8
+2. Stop services on server: `ssh logbookdata 'cd /opt/logbook-rag && docker compose down'`
+3. Rsync the 4 required files (see above)
+4. Restart: `ssh logbookdata 'cd /opt/logbook-rag && docker compose up -d'`
+
+### Query flow
+
+1. Lambda receives a technician query from the app
+2. Lambda calls `POST https://assistant.joinlogbook.com/query` with API key
+3. Server resolves VIN → technical type (S3 shard → CNH Store API fallback)
+4. Query expansion via gpt-4o-mini (3 alternatives)
+5. Hybrid retrieval: Qdrant vector search + BM25 keyword, RRF fusion
+6. Series/TT boost (3x score for applicable IUs)
+7. Context assembly (top-15 chunks within 10K token budget, adjacent chunk expansion)
+8. Generation via gpt-4o with technical system prompt
+9. Response returned to Lambda → app
