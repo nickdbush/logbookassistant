@@ -120,7 +120,9 @@ def _format_user_turn(turn: dict, question_map: dict[str, str] | None = None) ->
         for ans in turn["answers"]:
             qid = ans.get("question_id", "?")
             label = qmap.get(qid, qid)
-            if ans.get("selected"):
+            if ans.get("text"):
+                parts.append(f"{label}: {ans['text']}")
+            elif ans.get("selected"):
                 parts.append(f"{label}: {', '.join(ans['selected'])}")
             elif ans.get("number") is not None:
                 parts.append(f"{label}: {ans['number']}")

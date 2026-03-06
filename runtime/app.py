@@ -62,6 +62,7 @@ class QuestionAnswer(BaseModel):
     question_id: str
     selected: list[str] | None = None
     number: float | None = None
+    text: str | None = None
 
 
 class ConversationTurn(BaseModel):
