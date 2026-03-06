@@ -16,6 +16,7 @@ from typing import Literal
 
 import asyncpg
 import duckdb
+import numpy as np
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -154,35 +155,30 @@ async def lifespan(app: FastAPI):
     t_cache = time.time()
     db = app.state.duckdb
 
-    # Single query builds both iu_series_map and iu_metadata
+    # iu_series_map: canonical_id → frozenset of series (for boost/filter)
     cur = db.cursor()
     rows = cur.execute(
-        "SELECT canonical_id, content_type, fault_codes, iu_cross_references, appearances, title FROM canonical_ius"
+        "SELECT canonical_id, appearances FROM canonical_ius"
     ).fetchall()
     cur.close()
     iu_series_map = {}
-    iu_metadata = {}
-    for row in rows:
-        canonical_id = row[0]
-        appearances = row[4]
+    for canonical_id, appearances in rows:
         apps = json.loads(appearances) if appearances and appearances != "[]" else []
         series_set = frozenset(a.get("series", "") for a in apps if isinstance(a, dict))
         iu_series_map[canonical_id] = series_set
-        iu_metadata[canonical_id] = (row[1], row[2], row[3], row[4], row[5])
-    logger.info("  iu_series_map + iu_metadata: %d entries", len(iu_metadata))
-
     app.state.iu_series_map = iu_series_map
-    app.state.iu_metadata = iu_metadata
+    logger.info("  iu_series_map: %d entries", len(iu_series_map))
 
-    # iu_to_chunk_indices: base miuid → list of chunk array indices
-    iu_to_chunk_indices: dict[str, list[int]] = {}
+    # iu_to_chunk_indices: base miuid → numpy int32 array of chunk indices
+    iu_to_chunk_lists: dict[str, list[int]] = {}
     for i, cid in enumerate(app.state.chunk_ids):
         iu_id = cid.rsplit("_c", 1)[0]
-        # Strip version suffix to get base miuid
         base_miuid = iu_id
         if base_miuid.endswith(("_v1", "_v2", "_v3", "_v4", "_v5")):
             base_miuid = base_miuid.rsplit("_v", 1)[0]
-        iu_to_chunk_indices.setdefault(base_miuid, []).append(i)
+        iu_to_chunk_lists.setdefault(base_miuid, []).append(i)
+    iu_to_chunk_indices = {k: np.array(v, dtype=np.int32) for k, v in iu_to_chunk_lists.items()}
+    del iu_to_chunk_lists
     app.state.iu_to_chunk_indices = iu_to_chunk_indices
     logger.info("  iu_to_chunk_indices: %d IUs", len(iu_to_chunk_indices))
 
@@ -265,7 +261,7 @@ async def query(req: QueryRequest):
             app.state.chunk_indices_arr,
             series_filter=req.series,
             iu_series_map=app.state.iu_series_map,
-            iu_metadata=app.state.iu_metadata,
+            db=app.state.duckdb,
         )
         spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 
@@ -355,7 +351,7 @@ async def query(req: QueryRequest):
             app.state.chunk_indices_arr,
             series_filter=req.series,
             iu_series_map=app.state.iu_series_map,
-            iu_metadata=app.state.iu_metadata,
+            db=app.state.duckdb,
         )
         spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 

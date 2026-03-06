@@ -224,9 +224,27 @@ def apply_tt_filter(rrf_scores, tt_id, tt_only=False, db=None, applicable_miuids
 def assemble_context(
     ranked_chunks, chunk_ids, texts, content_types, token_counts, id_to_idx,
     num_chunks_arr, chunk_indices_arr, series_filter=None,
-    iu_series_map=None, iu_metadata=None,
+    iu_series_map=None, db=None,
 ):
     """Assemble context from top chunks, respecting token budget."""
+    # Batch-fetch metadata for the small number of IUs we'll actually use
+    candidate_iu_ids = []
+    for cid, _ in ranked_chunks[:FINAL_TOP_K]:
+        if id_to_idx.get(cid) is not None:
+            candidate_iu_ids.append(cid.rsplit("_c", 1)[0])
+    iu_metadata_local = {}
+    if candidate_iu_ids and db is not None:
+        unique_ids = list(set(candidate_iu_ids))
+        placeholders = ",".join(["?"] * len(unique_ids))
+        cur = db.cursor()
+        rows = cur.execute(
+            f"SELECT canonical_id, content_type, title FROM canonical_ius WHERE canonical_id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+        cur.close()
+        for row in rows:
+            iu_metadata_local[row[0]] = (row[1], row[2])
+
     context_blocks = []
     sources = []
     total_tokens = 0
@@ -244,16 +262,15 @@ def assemble_context(
 
         iu_id = cid.rsplit("_c", 1)[0]
 
-        # Use cached metadata instead of per-chunk DuckDB query
         in_target_series = False
         content_type = content_types[idx] or "unknown"
         title = ""
-        iu_row = iu_metadata.get(iu_id) if iu_metadata else None
+        iu_row = iu_metadata_local.get(iu_id)
         if iu_row:
             content_type = iu_row[0] or content_type
-            title = iu_row[4] or ""
-            if series_filter and iu_series_map:
-                in_target_series = series_filter in iu_series_map.get(iu_id, frozenset())
+            title = iu_row[1] or ""
+        if series_filter and iu_series_map:
+            in_target_series = series_filter in iu_series_map.get(iu_id, frozenset())
 
         # Pull adjacent chunks if multi-chunk IU
         full_text = chunk_text
