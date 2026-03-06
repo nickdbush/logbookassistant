@@ -83,6 +83,7 @@ class QueryRequest(BaseModel):
     sources: list[dict] | None = None
     conversation_id: str | None = None
     expanded_queries: list[str] | None = None
+    vin_info: dict | None = None
 
 
 class Span(BaseModel):
@@ -268,7 +269,7 @@ async def query(req: QueryRequest):
         spans.append(Span(name="context_assembly", duration_ms=int((time.time() - t) * 1000)))
 
         retrieval_ms = 0
-        vin_info = None
+        vin_info = req.vin_info
 
         # Generation with conversation history
         t_gen = time.time()
@@ -276,6 +277,7 @@ async def query(req: QueryRequest):
         answer, questions, gen_mc = await generate_answer(
             app.state.anthropic, req.query, context, sources,
             model=req.model, conversation=conversation_dicts,
+            vin_info=vin_info,
         )
         generation_ms = int((time.time() - t_gen) * 1000)
         spans.append(Span(name="generation", duration_ms=generation_ms))
@@ -362,6 +364,7 @@ async def query(req: QueryRequest):
         t_gen = time.time()
         answer, questions, gen_mc = await generate_answer(
             app.state.anthropic, req.query, context, sources, model=req.model,
+            vin_info=vin_info,
         )
         generation_ms = int((time.time() - t_gen) * 1000)
         spans.append(Span(name="generation", duration_ms=generation_ms))

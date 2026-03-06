@@ -34,6 +34,7 @@ Guidelines:
 - If the documentation doesn't contain enough info, say so clearly
 - Use clear technical language appropriate for dealer technicians
 - When multiple procedures apply, list them in logical diagnostic order
+- If machine information is provided, use it to tailor your answer — do not ask the technician to confirm their machine details
 
 ## Clarifying Questions
 When the technician's question is ambiguous or you need more information for an \
@@ -135,9 +136,26 @@ async def generate_answer(
     sources: list[dict],
     model: str = DEFAULT_GEN_MODEL,
     conversation: list[dict] | None = None,
+    vin_info: dict | None = None,
 ) -> tuple[str, list[dict] | None, dict]:
     """Generate answer from context using Anthropic structured output."""
-    user_msg = f"""Question: {query}
+    machine_section = ""
+    if vin_info:
+        parts = []
+        if vin_info.get("brand_name"):
+            parts.append(f"Brand: {vin_info['brand_name']}")
+        if vin_info.get("model_name"):
+            parts.append(f"Model: {vin_info['model_name']}")
+        if vin_info.get("series_name"):
+            parts.append(f"Series: {vin_info['series_name']}")
+        if vin_info.get("tt_name"):
+            parts.append(f"Technical Type: {vin_info['tt_name']}")
+        if vin_info.get("vin"):
+            parts.append(f"VIN: {vin_info['vin']}")
+        if parts:
+            machine_section = "\n\nMachine:\n" + "\n".join(parts)
+
+    user_msg = f"""Question: {query}{machine_section}
 
 Reference Documentation:
 {context}
