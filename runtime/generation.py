@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json as _json
+import logging
 from typing import Literal
 
 from pydantic import BaseModel
+
+logger = logging.getLogger("assistant")
 
 DEFAULT_GEN_MODEL = "claude-sonnet-4-6"
 
@@ -95,7 +98,9 @@ async def expand_query(client, query: str) -> list[str]:
         ],
         max_completion_tokens=400,
     )
-    lines = [line.strip() for line in resp.choices[0].message.content.strip().split("\n") if line.strip()]
+    raw_content = resp.choices[0].message.content
+    logger.info("Query expansion raw response: %r", raw_content)
+    lines = [line.strip() for line in (raw_content or "").strip().split("\n") if line.strip()]
     expansions = lines[:3]
     model_call = {
         "name": "query_expansion",
